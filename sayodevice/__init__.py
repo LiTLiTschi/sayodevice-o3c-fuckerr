@@ -13,7 +13,7 @@ Quick start::
     #   sayodevice interactive
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from .protocol import (
     UsagePage,
@@ -21,6 +21,7 @@ from .protocol import (
     HidCommand,
     build_packet,
     build_key_config,
+    build_screen_element,
     calc_checksum,
     SAYO_VID,
     SAYO_PID,
@@ -36,6 +37,7 @@ __all__ = [
     "HidCommand",
     "build_packet",
     "build_key_config",
+    "build_screen_element",
     "calc_checksum",
     "SAYO_VID",
     "SAYO_PID",

@@ -36,6 +36,7 @@ from .protocol import (
     HidCommand,
     build_packet,
     build_key_config,
+    build_screen_element,
     calc_checksum,
 )
 
@@ -283,6 +284,43 @@ class SayoDevice:
     def save(self) -> bytes | None:
         """Send Save command (CMD 0x0D) to persist changes."""
         return self.send_single(CmdId.SAVE, wait_response=True)
+
+    def set_screen_element(
+        self,
+        x: int = 0,
+        y: int = 0,
+        width: int = 40,
+        height: int = 40,
+        color: int = 0xFFFF,
+        element_type: int = 1,
+        element_index: int = 0x0F,
+    ) -> bytes | None:
+        """
+        Set screen element properties via SCREEN_MAIN (CMD 0x22).
+
+        Args:
+            x: X-position in pixels.
+            y: Y-position in pixels (unconfirmed, reserved for future use).
+            width: Element width in pixels.
+            height: Element height in pixels.
+            color: Colour value (uint16, 0xFFFF = white).
+            element_type: Element type (1 = Pure Color).
+            element_index: Element/Fn index (0x0F observed in captures).
+
+        Returns:
+            Response bytes or None.
+        """
+        data = build_screen_element(
+            x=x, y=y, width=width, height=height,
+            color=color, element_type=element_type,
+        )
+        return self.send_single(
+            CmdId.SCREEN_MAIN, data, index=element_index,
+        )
+
+    def refresh_display(self) -> bytes | None:
+        """Send DISPLAY command (CMD 0x25) to refresh the screen."""
+        return self.send_single(CmdId.DISPLAY)
 
     def get_device_name(self) -> str:
         """Query device name (CMD 0x01)."""
