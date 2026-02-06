@@ -88,24 +88,25 @@ class SayoREPL(cmd.Cmd):
         except Exception as e:
             print(f"  ERROR: {e}")
 
-    def do_screen_x(self, arg: str):
-        """Set screen element X-position. Usage: screen_x <x> [--index 0x0F] [--refresh]
-        Example: screen_x 120
-        Example: screen_x 50 --index 0x0F --refresh"""
+    def do_screen_pos(self, arg: str):
+        """Set screen element position. Usage: screen_pos <x> <y> [--index 0x0F] [--refresh]
+        Example: screen_pos 120 40
+        Example: screen_pos 50 50 --index 0x0F --refresh"""
         parts = arg.split()
-        if not parts:
-            print("  Usage: screen_x <x> [--index 0x0F] [--refresh]")
+        if len(parts) < 2:
+            print("  Usage: screen_pos <x> <y> [--index 0x0F] [--refresh]")
             return
         try:
             x = int(parts[0])
+            y = int(parts[1])
             element_index = 0x0F
             do_refresh = "--refresh" in parts
             if "--index" in parts:
                 idx = parts.index("--index")
                 if idx + 1 < len(parts):
                     element_index = int(parts[idx + 1], 0)
-            resp = self.dev.set_screen_element(x=x, element_index=element_index)
-            print(f"  Set X={x} (element_index=0x{element_index:02X})")
+            resp = self.dev.set_screen_element(x=x, y=y, element_index=element_index)
+            print(f"  Set X={x}, Y={y} (element_index=0x{element_index:02X})")
             if resp:
                 print(f"  Response: {bytes(resp)[:32].hex(' ')}")
             if do_refresh:
@@ -291,13 +292,14 @@ def main(argv: list[str] | None = None):
     p_arg0.add_argument("value", type=int, help="Value 0-255")
     p_arg0.add_argument("--nosave", action="store_true", help="Don't save after setting")
 
-    # set-x
-    p_setx = sub.add_parser("set-x", help="Set screen element X-position")
-    p_setx.add_argument("x", type=int, help="X-position in pixels")
-    p_setx.add_argument("--index", type=lambda v: int(v, 0), default=0x0F,
-                         help="Element index (default: 0x0F)")
-    p_setx.add_argument("--refresh", action="store_true",
-                         help="Send display refresh after setting")
+    # set-pos
+    p_pos = sub.add_parser("set-pos", aliases=["set-x"], help="Set screen element X/Y position")
+    p_pos.add_argument("x", type=int, help="X-position in pixels")
+    p_pos.add_argument("--y", type=int, default=0, help="Y-position in pixels (default: 0)")
+    p_pos.add_argument("--index", type=lambda v: int(v, 0), default=0x0F,
+                        help="Element index (default: 0x0F)")
+    p_pos.add_argument("--refresh", action="store_true",
+                        help="Send display refresh after setting")
 
     # save
     sub.add_parser("save", help="Send Save command")
@@ -366,9 +368,9 @@ def main(argv: list[str] | None = None):
             dev.set_key_arg0(args.value, save=do_save)
             print(f"✅ Arg0 = {args.value}" + (" (saved)" if do_save else ""))
 
-        elif args.command == "set-x":
-            dev.set_screen_element(x=args.x, element_index=args.index)
-            print(f"✅ X={args.x} (element_index=0x{args.index:02X})")
+        elif args.command in ("set-pos", "set-x"):
+            dev.set_screen_element(x=args.x, y=args.y, element_index=args.index)
+            print(f"✅ X={args.x}, Y={args.y} (element_index=0x{args.index:02X})")
             if args.refresh:
                 dev.refresh_display()
                 print("✅ Display refreshed")
