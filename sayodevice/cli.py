@@ -27,6 +27,7 @@ from .protocol import (
     DEFAULT_ECHO,
 )
 from .device import SayoDevice, SayoInterface
+from .analyzer import analyze_pcapng
 
 
 # ============================================================
@@ -126,6 +127,69 @@ class SayoREPL(cmd.Cmd):
                 print(f"  Response: {bytes(resp)[:32].hex(' ')}")
         except Exception as e:
             print(f"  ERROR: {e}")
+
+    def do_analyze(self, arg: str):
+        """Analyze a pcapng capture file. Usage: analyze <file.pcapng> [--device N]
+        Example: analyze capture.pcapng
+        Example: analyze capture.pcapng --device 3"""
+        parts = arg.split()
+        if not parts:
+            print("  Usage: analyze <file.pcapng> [--device N]")
+            return
+        try:
+            filepath = parts[0]
+            device = None
+            if "--device" in parts:
+                idx = parts.index("--device")
+                if idx + 1 < len(parts):
+                    device = int(parts[idx + 1])
+            report = analyze_pcapng(filepath, device=device)
+            print(report)
+        except Exception as e:
+            print(f"  ERROR: {e}")
+
+    def do_probe(self, arg: str):
+        """Probe screen element fields interactively. Usage: probe [field] [start] [end] [step]
+        Fields: x, y, width, height, color, type
+        Example: probe x 0 160 20
+        Example: probe y 0 80 10
+        Example: probe color 0x0000 0xFFFF 0x1000"""
+        parts = arg.split()
+        if not parts:
+            print("  Usage: probe <field> [start] [end] [step]")
+            print("  Fields: x, y, width, height, color, type")
+            print("  Example: probe x 0 160 20")
+            return
+
+        field_name = parts[0].lower()
+        field_map = {
+            "x": "x", "y": "y", "width": "width", "height": "height",
+            "color": "color", "type": "element_type",
+        }
+        if field_name not in field_map:
+            print(f"  Unknown field: {field_name}")
+            print(f"  Available: {', '.join(field_map.keys())}")
+            return
+
+        param = field_map[field_name]
+        start = int(parts[1], 0) if len(parts) > 1 else 0
+        end = int(parts[2], 0) if len(parts) > 2 else 160
+        step = int(parts[3], 0) if len(parts) > 3 else 20
+
+        print(f"  Probing {field_name} from {start} to {end} (step={step})")
+        print("  Watch the device screen. Press Ctrl+C to stop.")
+        try:
+            for val in range(start, end + 1, step):
+                kwargs = {param: val}
+                self.dev.set_screen_element(**kwargs)
+                sys.stdout.write(f"\r  {field_name} = {val:<6d}")
+                sys.stdout.flush()
+                time.sleep(0.3)
+            print(f"\n  Probe complete. {field_name} swept {start} -> {end}")
+        except KeyboardInterrupt:
+            print("\n  Stopped")
+        except Exception as e:
+            print(f"\n  ERROR: {e}")
 
     def do_save(self, _arg: str):
         """Send Save command (CMD 0x0D)."""
@@ -301,6 +365,12 @@ def main(argv: list[str] | None = None):
     p_pos.add_argument("--refresh", action="store_true",
                         help="Send display refresh after setting")
 
+    # analyze
+    p_analyze = sub.add_parser("analyze", help="Analyze a pcapng capture file")
+    p_analyze.add_argument("file", help="Path to .pcapng file")
+    p_analyze.add_argument("--device", type=int, default=None,
+                           help="USB device address to filter")
+
     # save
     sub.add_parser("save", help="Send Save command")
 
@@ -329,6 +399,12 @@ def main(argv: list[str] | None = None):
                 print(f"   {i.mode.name if i.mode else '?'}: {i.path.decode(errors='replace')[:80]}")
         else:
             print("\n❌ No config interfaces found. Is the device connected?")
+        return
+
+    # ---- analyze (no device needed) ----
+    if args.command == "analyze":
+        report = analyze_pcapng(args.file, device=args.device)
+        print(report)
         return
 
     # ---- All other commands need a device ----
