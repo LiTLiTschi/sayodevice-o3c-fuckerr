@@ -2,7 +2,7 @@
 
 Python library and CLI for controlling **SayoDevice O3C** keyboards via USB HID (API v2).
 
-Reverse-engineered from Wireshark captures and [khang06's protocol docs](https://gist.github.com/khang06/6186543b560548370ce7cc08cad7f710).
+Reverse-engineered from Wireshark captures and [khang06's protocol docs](https://gist.github.com/khang06/6186543b560548370ce7cc08cad7f710). And of course my favourite clanker, claude.
 
 ## Installation
 
