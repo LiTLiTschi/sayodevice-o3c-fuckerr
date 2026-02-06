@@ -174,6 +174,47 @@ ARG0_OFFSET = 0x1C  # V0
 # ARG1/2/3 offsets not yet confirmed from captures
 
 
+def build_screen_element(
+    x: int = 0,
+    y: int = 0,
+    width: int = 40,
+    height: int = 40,
+    color: int = 0xFFFF,
+    element_type: int = 1,
+) -> bytes:
+    """
+    Build SCREEN_MAIN (0x22) command data for a screen element.
+
+    The data portion is 56 bytes (command total = 60 bytes with 4-byte header).
+    Layout (offsets relative to command data start):
+        0-3:   element_type  (uint32_le, 1 = Pure Color)
+        4-5:   width         (uint16_le, pixels)
+        6-7:   height        (uint16_le, pixels)
+        8-11:  x_position    (uint32_le, pixels)
+        12-13: color         (uint16_le, e.g. 0xFFFF = white)
+        14-55: reserved      (zeros)
+
+    Args:
+        x: X-position in pixels.
+        y: Y-position in pixels (unconfirmed offset, not yet wired).
+        width: Element width in pixels.
+        height: Element height in pixels.
+        color: Colour value (uint16, 0xFFFF = white).
+        element_type: Element type (1 = Pure Color).
+
+    Returns:
+        56-byte payload ready for HidCommand.data.
+    """
+    data = bytearray(56)
+    struct.pack_into("<I", data, 0, element_type)
+    struct.pack_into("<H", data, 4, width)
+    struct.pack_into("<H", data, 6, height)
+    struct.pack_into("<I", data, 8, x)
+    struct.pack_into("<H", data, 12, color)
+    # bytes 14-55 stay zero (reserved / y-position TBD)
+    return bytes(data)
+
+
 def build_key_config(
     arg0: int = 0,
     arg1: int | None = None,
