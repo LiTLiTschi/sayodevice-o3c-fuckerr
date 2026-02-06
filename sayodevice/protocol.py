@@ -190,13 +190,14 @@ def build_screen_element(
         0-3:   element_type  (uint32_le, 1 = Pure Color)
         4-5:   width         (uint16_le, pixels)
         6-7:   height        (uint16_le, pixels)
-        8-11:  x_position    (uint32_le, pixels)
+        8-9:   x_position    (uint16_le, pixels)
+        10-11: y_position    (uint16_le, pixels)
         12-13: color         (uint16_le, e.g. 0xFFFF = white)
         14-55: reserved      (zeros)
 
     Args:
-        x: X-position in pixels.
-        y: Y-position in pixels (unconfirmed offset, not yet wired).
+        x: X-position in pixels (uint16, 0-65535).
+        y: Y-position in pixels (uint16, 0-65535).
         width: Element width in pixels.
         height: Element height in pixels.
         color: Colour value (uint16, 0xFFFF = white).
@@ -209,9 +210,10 @@ def build_screen_element(
     struct.pack_into("<I", data, 0, element_type)
     struct.pack_into("<H", data, 4, width)
     struct.pack_into("<H", data, 6, height)
-    struct.pack_into("<I", data, 8, x)
+    struct.pack_into("<H", data, 8, x)
+    struct.pack_into("<H", data, 10, y)
     struct.pack_into("<H", data, 12, color)
-    # bytes 14-55 stay zero (reserved / y-position TBD)
+    # bytes 14-55 stay zero (reserved)
     return bytes(data)
 
 

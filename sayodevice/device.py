@@ -299,8 +299,8 @@ class SayoDevice:
         Set screen element properties via SCREEN_MAIN (CMD 0x22).
 
         Args:
-            x: X-position in pixels.
-            y: Y-position in pixels (unconfirmed, reserved for future use).
+            x: X-position in pixels (uint16, 0-65535).
+            y: Y-position in pixels (uint16, 0-65535).
             width: Element width in pixels.
             height: Element height in pixels.
             color: Colour value (uint16, 0xFFFF = white).
