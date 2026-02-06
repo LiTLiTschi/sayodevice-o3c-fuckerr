@@ -13,7 +13,7 @@ Quick start::
     #   sayodevice interactive
 """
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 from .protocol import (
     UsagePage,
@@ -25,6 +25,13 @@ from .protocol import (
     calc_checksum,
     SAYO_VID,
     SAYO_PID,
+    SysInfo,
+    DeviceSetting,
+    parse_sys_info,
+    parse_setting,
+    rgb_to_565,
+    rgb565_to_rgb,
+    hex_color_to_565,
 )
 from .device import SayoDevice, SayoInterface, DeviceInfo
 from .analyzer import analyze_pcapng, parse_pcapng, decode_sayo_packet, analyze_commands
@@ -42,6 +49,13 @@ __all__ = [
     "calc_checksum",
     "SAYO_VID",
     "SAYO_PID",
+    "SysInfo",
+    "DeviceSetting",
+    "parse_sys_info",
+    "parse_setting",
+    "rgb_to_565",
+    "rgb565_to_rgb",
+    "hex_color_to_565",
     "analyze_pcapng",
     "parse_pcapng",
     "decode_sayo_packet",

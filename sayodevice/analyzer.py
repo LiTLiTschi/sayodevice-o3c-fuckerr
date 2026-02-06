@@ -295,6 +295,22 @@ _KNOWN_FIELDS: dict[int, list[tuple[int, int, str, str]]] = {
     CmdId.KEY: [
         (0x1C, 1, "uint8", "arg0 (V0)"),
     ],
+    CmdId.SYS_INFO: [
+        (0, 2, "uint16_le", "display_width"),
+        (2, 2, "uint16_le", "display_height"),
+        (4, 2, "uint16_le", "unknown_60"),
+        (6, 2, "uint16_le", "hw_id"),
+        (8, 4, "uint32_le", "uptime_s"),
+        (12, 2, "uint16_le", "vid"),
+        (14, 2, "uint16_le", "pid"),
+        (36, 2, "uint16_le", "config_crc"),
+    ],
+    CmdId.SETTING: [
+        (0, 2, "uint16_le", "host_width"),
+        (2, 2, "uint16_le", "host_height"),
+        (8, 1, "uint8", "brightness?"),
+        (9, 3, "bytes", "color_rgb?"),
+    ],
 }
 
 

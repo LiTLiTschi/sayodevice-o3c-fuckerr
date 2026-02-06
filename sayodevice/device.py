@@ -38,6 +38,10 @@ from .protocol import (
     build_key_config,
     build_screen_element,
     calc_checksum,
+    SysInfo,
+    DeviceSetting,
+    parse_sys_info,
+    parse_setting,
 )
 
 # ============================================================
@@ -366,6 +370,82 @@ class SayoDevice:
             dev.refresh_display()
         """
         return self.send_single(CmdId.DISPLAY)
+
+    def get_sys_info(self) -> SysInfo:
+        """
+        Sendet SYS_INFO (CMD 0x02) und versucht die Antwort zu parsen.
+
+        Returns:
+            SysInfo: Geparstes Objekt mit Display-Abmessungen, HW-ID, Uptime, VID/PID.
+
+        Beispiel:
+            si = dev.get_sys_info()
+            print(si.display_width, si.display_height)
+        """
+        resp = self.send_single(CmdId.SYS_INFO)
+        if resp and len(resp) > 8:
+            payload = resp[8:]
+            return parse_sys_info(payload)
+        return SysInfo(raw=bytes(resp) if resp else b"")
+
+    def get_display_size(self) -> tuple[int, int]:
+        """
+        Gibt die Display-Abmessungen als (width, height) Tuple zurück.
+
+        Returns:
+            Tuple[int, int]: (display_width, display_height), z.B. (160, 80).
+
+        Beispiel:
+            w, h = dev.get_display_size()
+        """
+        si = self.get_sys_info()
+        return (si.display_width, si.display_height)
+
+    def get_setting(self) -> DeviceSetting:
+        """
+        Sendet SETTING (CMD 0x03) und versucht die Antwort zu parsen.
+
+        Returns:
+            DeviceSetting: Geparstes Objekt mit Host-Auflösung.
+
+        Beispiel:
+            s = dev.get_setting()
+            print(s.host_width, s.host_height)
+        """
+        resp = self.send_single(CmdId.SETTING)
+        if resp and len(resp) > 8:
+            payload = resp[8:]
+            return parse_setting(payload)
+        return DeviceSetting(raw=bytes(resp) if resp else b"")
+
+    def send_heartbeat(self) -> None:
+        """
+        Sendet das SYS_INFO + SETTING Paar, das die offizielle GUI alle ~2s sendet.
+
+        Dies hält das Gerät möglicherweise wach und empfangsbereit.
+
+        Beispiel:
+            dev.send_heartbeat()
+        """
+        # SYS_INFO: 44 bytes with observed constant values
+        sys_data = bytearray(44)
+        struct.pack_into("<H", sys_data, 0, 160)    # display_width
+        struct.pack_into("<H", sys_data, 2, 80)     # display_height
+        struct.pack_into("<H", sys_data, 4, 60)     # unknown (refresh rate?)
+        struct.pack_into("<H", sys_data, 6, 902)    # hw_id
+        struct.pack_into("<I", sys_data, 8, int(time.time()) & 0xFFFFFFFF)  # uptime approx
+        struct.pack_into("<H", sys_data, 12, SAYO_VID)
+        struct.pack_into("<H", sys_data, 14, SAYO_PID)
+
+        # SETTING: 38 bytes with observed constant values
+        set_data = bytearray(38)
+        struct.pack_into("<H", set_data, 0, 1920)   # host_width
+        struct.pack_into("<H", set_data, 2, 1080)   # host_height
+
+        self.send_command([
+            HidCommand(CmdId.SYS_INFO, data=bytes(sys_data)),
+            HidCommand(CmdId.SETTING, data=bytes(set_data)),
+        ], wait_response=False)
 
     def get_device_name(self) -> str:
         """
