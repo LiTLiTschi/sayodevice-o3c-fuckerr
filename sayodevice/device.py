@@ -231,7 +231,16 @@ class SayoDevice:
     # ---- High-level commands ----
 
     def get_info(self) -> DeviceInfo:
-        """Query device info (CMD 0x00)."""
+        """
+        Liest Geräteinformationen (CMD 0x00).
+
+        Returns:
+            DeviceInfo: Objekt mit Modell, Firmware, Batterie usw.
+
+        Beispiel:
+            info = dev.get_info()
+            print(info.model_code, info.firmware_version)
+        """
         resp = self.send_single(CmdId.INFO)
         info = DeviceInfo()
         if resp and len(resp) >= 12:
@@ -278,11 +287,29 @@ class SayoDevice:
         return resp
 
     def set_key_arg0(self, value: int, key_index: int = 0, save: bool = True):
-        """Convenience: set Arg0 for a key and optionally save."""
+        """
+        Setzt den Arg0-Wert für einen Key und speichert optional.
+
+        Args:
+            value (int): Neuer Wert für Arg0 (0-255)
+            key_index (int): Index des Keys (Standard: 0)
+            save (bool): Wenn True, wird nach dem Setzen gespeichert
+
+        Beispiel:
+            dev.set_key_arg0(42, save=True)
+        """
         return self.set_key_config(arg0=value, key_index=key_index, save=save)
 
     def save(self) -> bytes | None:
-        """Send Save command (CMD 0x0D) to persist changes."""
+        """
+        Sendet den Save-Befehl (CMD 0x0D), um Änderungen zu speichern.
+
+        Returns:
+            Antwort-Bytes oder None.
+
+        Beispiel:
+            dev.save()
+        """
         return self.send_single(CmdId.SAVE, wait_response=True)
 
     def set_screen_element(
@@ -294,36 +321,63 @@ class SayoDevice:
         color: int = 0xFFFF,
         element_type: int = 1,
         element_index: int = 0x0F,
+        refresh: bool = False,
     ) -> bytes | None:
         """
         Set screen element properties via SCREEN_MAIN (CMD 0x22).
 
+        Diese Methode setzt die Position und Eigenschaften eines Screen-Elements auf dem Gerät.
+
         Args:
-            x: X-position in pixels (uint16, 0-65535).
-            y: Y-position in pixels (uint16, 0-65535).
-            width: Element width in pixels.
-            height: Element height in pixels.
-            color: Colour value (uint16, 0xFFFF = white).
-            element_type: Element type (1 = Pure Color).
-            element_index: Element/Fn index (0x0F observed in captures).
+            x (int): X-Position in Pixeln (0-65535).
+            y (int): Y-Position in Pixeln (0-65535).
+            width (int): Breite des Elements in Pixeln.
+            height (int): Höhe des Elements in Pixeln.
+            color (int): Farbwert (0xFFFF = weiß).
+            element_type (int): Elementtyp (1 = Pure Color).
+            element_index (int): Index des Elements/Fn (z.B. 0x0F).
+            refresh (bool): Wenn True, wird nach dem Setzen ein Display-Refresh ausgeführt.
 
         Returns:
-            Response bytes or None.
+            Response bytes oder None.
+
+        Beispiel:
+            dev.set_screen_element(x=120, y=40, element_index=0x0F, refresh=True)
         """
         data = build_screen_element(
             x=x, y=y, width=width, height=height,
             color=color, element_type=element_type,
         )
-        return self.send_single(
+        resp = self.send_single(
             CmdId.SCREEN_MAIN, data, index=element_index,
         )
+        if refresh:
+            self.refresh_display()
+        return resp
 
     def refresh_display(self) -> bytes | None:
-        """Send DISPLAY command (CMD 0x25) to refresh the screen."""
+        """
+        Sendet den DISPLAY-Refresh-Befehl (CMD 0x25).
+
+        Returns:
+            Antwort-Bytes oder None.
+
+        Beispiel:
+            dev.refresh_display()
+        """
         return self.send_single(CmdId.DISPLAY)
 
     def get_device_name(self) -> str:
-        """Query device name (CMD 0x01)."""
+        """
+        Liest den Gerätenamen (CMD 0x01).
+
+        Returns:
+            str: Gerätename als String.
+
+        Beispiel:
+            name = dev.get_device_name()
+            print(name)
+        """
         resp = self.send_single(CmdId.DEVICE_NAME)
         if resp and len(resp) > 8:
             # Name is UTF-16LE or UTF-32LE after cmd header
