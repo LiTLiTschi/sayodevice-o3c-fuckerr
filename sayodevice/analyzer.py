@@ -600,6 +600,96 @@ def _format_report(
     return "\n".join(lines)
 
 
+# ============================================================
+# Live packet decoder (no pcapng file needed)
+# ============================================================
+
+def decode_raw_response(data: bytes) -> str:
+    """
+    Decode a raw HID response packet and format a human-readable breakdown.
+
+    Takes the raw bytes received from the device (without report_id prefix
+    if hidapi already stripped it, or with it) and decodes all TLV commands,
+    applying known field labels.
+
+    Args:
+        data: Raw HID response bytes from device.
+
+    Returns:
+        Formatted multi-line string showing decoded fields.
+    """
+    if not data or len(data) < 4:
+        return "  (empty or too short)"
+
+    lines: list[str] = []
+    w = lines.append
+
+    # Determine if first byte is report_id or if hidapi stripped it
+    # hidapi on some platforms strips report_id, on others it doesn't
+    # We check: if byte 0 is 0x22 or 0x21, treat as report_id present
+    if data[0] in (_REPORT_ID_HIGHSPEED, _REPORT_ID_NORMAL):
+        echo = data[1]
+        checksum = struct.unpack_from("<H", data, 2)[0]
+        w(f"  report_id=0x{data[0]:02X}  echo=0x{echo:02X}  checksum=0x{checksum:04X}")
+        cmd_offset = 4
+    else:
+        # Assume hidapi stripped report_id, first byte is echo
+        echo = data[0]
+        checksum = struct.unpack_from("<H", data, 1)[0] if len(data) >= 3 else 0
+        w(f"  echo=0x{echo:02X}  (report_id stripped by hidapi)")
+        cmd_offset = 3
+
+    # Decode TLV commands
+    cmd_count = 0
+    while cmd_offset + 4 <= len(data):
+        cmd_len = struct.unpack_from("<H", data, cmd_offset)[0]
+        if cmd_len < 4:
+            break
+
+        cmd_id = data[cmd_offset + 2]
+        index = data[cmd_offset + 3]
+        cmd_data = data[cmd_offset + 4 : cmd_offset + cmd_len]
+
+        try:
+            cmd_name = CmdId(cmd_id).name
+        except ValueError:
+            cmd_name = f"UNKNOWN_0x{cmd_id:02X}"
+
+        cmd_count += 1
+        w("")
+        w(f"  [{cmd_count}] {cmd_name} (0x{cmd_id:02X}) index={index}  [{len(cmd_data)} bytes]")
+
+        if cmd_data:
+            # Apply known field labels
+            known = _KNOWN_FIELDS.get(cmd_id, [])
+            if known:
+                for koff, ksize, ktype, klabel in known:
+                    if koff + ksize <= len(cmd_data):
+                        val = _read_field(cmd_data, koff, ksize)
+                        if ksize == 1:
+                            val_str = f"0x{val:02X} (={val})"
+                        elif ksize == 2:
+                            val_str = f"0x{val:04X} (={val})"
+                        elif ksize == 4:
+                            val_str = f"0x{val:08X} (={val})"
+                        else:
+                            val_str = cmd_data[koff:koff + ksize].hex(" ")
+                        w(f"      [{koff:2d}-{koff + ksize - 1:2d}] {ktype:10s} = {val_str}  ({klabel})")
+            else:
+                # No known fields — dump first 32 bytes as hex
+                w(f"      hex: {cmd_data[:32].hex(' ')}")
+                if len(cmd_data) > 32:
+                    w(f"      ... ({len(cmd_data)} bytes total)")
+
+        cmd_offset += (cmd_len + 3) & ~3
+
+    if cmd_count == 0:
+        w("  (no TLV commands decoded)")
+        w(f"  raw hex: {data[:64].hex(' ')}")
+
+    return "\n".join(lines)
+
+
 def _format_group(ga: CommandGroupAnalysis, lines: list[str]) -> None:
     """Format a single CommandGroupAnalysis into lines."""
     w = lines.append

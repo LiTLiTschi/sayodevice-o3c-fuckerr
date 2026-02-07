@@ -13,7 +13,7 @@ Quick start::
     #   sayodevice interactive
 """
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 from .protocol import (
     UsagePage,
@@ -34,7 +34,7 @@ from .protocol import (
     hex_color_to_565,
 )
 from .device import SayoDevice, SayoInterface, DeviceInfo
-from .analyzer import analyze_pcapng, parse_pcapng, decode_sayo_packet, analyze_commands
+from .analyzer import analyze_pcapng, parse_pcapng, decode_sayo_packet, analyze_commands, decode_raw_response
 
 __all__ = [
     "SayoDevice",
@@ -60,4 +60,5 @@ __all__ = [
     "parse_pcapng",
     "decode_sayo_packet",
     "analyze_commands",
+    "decode_raw_response",
 ]
