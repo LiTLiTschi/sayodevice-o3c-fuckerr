@@ -217,6 +217,121 @@ def build_screen_element(
     return bytes(data)
 
 
+# ============================================================
+# RGB565 color helpers
+# ============================================================
+
+def rgb_to_565(r: int, g: int, b: int) -> int:
+    """Convert 8-bit RGB to RGB565 uint16.
+
+    Example: rgb_to_565(255, 0, 0) == 0xF800 (red)
+    """
+    return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+
+
+def rgb565_to_rgb(c: int) -> tuple[int, int, int]:
+    """Convert RGB565 uint16 back to 8-bit RGB tuple.
+
+    Example: rgb565_to_rgb(0xF800) == (248, 0, 0)
+    """
+    r = ((c >> 11) & 0x1F) << 3
+    g = ((c >> 5) & 0x3F) << 2
+    b = (c & 0x1F) << 3
+    return (r, g, b)
+
+
+def hex_color_to_565(hex_color: str) -> int:
+    """Convert '#RRGGBB' hex string to RGB565 uint16.
+
+    Example: hex_color_to_565('#FF0000') == 0xF800
+    """
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        raise ValueError(f"Expected 6-char hex color, got {hex_color!r}")
+    r = int(h[0:2], 16)
+    g = int(h[2:4], 16)
+    b = int(h[4:6], 16)
+    return rgb_to_565(r, g, b)
+
+
+# ============================================================
+# SYS_INFO / SETTING parsers
+# ============================================================
+
+@dataclass
+class SysInfo:
+    """Parsed SYS_INFO (0x02) data from device."""
+    display_width: int = 0
+    display_height: int = 0
+    unknown_60: int = 0
+    hw_id: int = 0
+    uptime_s: int = 0
+    vid: int = 0
+    pid: int = 0
+    config_crc: int = 0
+    raw: bytes = b""
+
+    def __str__(self) -> str:
+        return (
+            f"SysInfo(display={self.display_width}x{self.display_height}, "
+            f"hw_id={self.hw_id}, uptime={self.uptime_s}s, "
+            f"vid=0x{self.vid:04X}, pid=0x{self.pid:04X}, "
+            f"crc=0x{self.config_crc:04X})"
+        )
+
+
+@dataclass
+class DeviceSetting:
+    """Parsed SETTING (0x03) data from device."""
+    host_width: int = 0
+    host_height: int = 0
+    raw: bytes = b""
+
+    def __str__(self) -> str:
+        return f"DeviceSetting(host={self.host_width}x{self.host_height})"
+
+
+def parse_sys_info(data: bytes) -> SysInfo:
+    """Parse SYS_INFO command data (44 bytes) into SysInfo.
+
+    Layout:
+        0-1:   display_width   uint16_le
+        2-3:   display_height  uint16_le
+        4-5:   unknown         uint16_le (60, maybe refresh rate)
+        6-7:   hw_id           uint16_le
+        8-11:  uptime_s        uint32_le
+        12-13: vid             uint16_le
+        14-15: pid             uint16_le
+        36-37: config_crc      uint16_le
+    """
+    info = SysInfo(raw=bytes(data))
+    if len(data) >= 16:
+        info.display_width = struct.unpack_from("<H", data, 0)[0]
+        info.display_height = struct.unpack_from("<H", data, 2)[0]
+        info.unknown_60 = struct.unpack_from("<H", data, 4)[0]
+        info.hw_id = struct.unpack_from("<H", data, 6)[0]
+        info.uptime_s = struct.unpack_from("<I", data, 8)[0]
+        info.vid = struct.unpack_from("<H", data, 12)[0]
+        info.pid = struct.unpack_from("<H", data, 14)[0]
+    if len(data) >= 38:
+        info.config_crc = struct.unpack_from("<H", data, 36)[0]
+    return info
+
+
+def parse_setting(data: bytes) -> DeviceSetting:
+    """Parse SETTING (0x03) command data into DeviceSetting.
+
+    Layout:
+        0-1:   host_width   uint16_le (e.g. 1920)
+        2-3:   host_height  uint16_le (e.g. 1080)
+    """
+    setting = DeviceSetting(raw=bytes(data))
+    if len(data) >= 4:
+        setting.host_width = struct.unpack_from("<H", data, 0)[0]
+        setting.host_height = struct.unpack_from("<H", data, 2)[0]
+    return setting
+
+
 def build_key_config(
     arg0: int = 0,
     arg1: int | None = None,

@@ -25,6 +25,8 @@ from .protocol import (
     build_key_config,
     calc_checksum,
     DEFAULT_ECHO,
+    hex_color_to_565,
+    rgb565_to_rgb,
 )
 from .device import SayoDevice, SayoInterface
 from .analyzer import analyze_pcapng
@@ -125,6 +127,64 @@ class SayoREPL(cmd.Cmd):
             print("  Display refresh sent")
             if resp:
                 print(f"  Response: {bytes(resp)[:32].hex(' ')}")
+        except Exception as e:
+            print(f"  ERROR: {e}")
+
+    def do_sys_info(self, _arg: str):
+        """Query SYS_INFO from device (CMD 0x02)."""
+        try:
+            si = self.dev.get_sys_info()
+            print(f"  {si}")
+            if si.raw:
+                print(f"  Raw ({len(si.raw)} bytes): {si.raw[:44].hex(' ')}")
+        except Exception as e:
+            print(f"  ERROR: {e}")
+
+    def do_setting(self, _arg: str):
+        """Query SETTING from device (CMD 0x03)."""
+        try:
+            s = self.dev.get_setting()
+            print(f"  {s}")
+            if s.raw:
+                print(f"  Raw ({len(s.raw)} bytes): {s.raw[:38].hex(' ')}")
+        except Exception as e:
+            print(f"  ERROR: {e}")
+
+    def do_display_size(self, _arg: str):
+        """Show display dimensions from SYS_INFO."""
+        try:
+            w, h = self.dev.get_display_size()
+            print(f"  Display: {w}x{h} pixels")
+        except Exception as e:
+            print(f"  ERROR: {e}")
+
+    def do_color(self, arg: str):
+        """Set screen element color. Usage: color <#RRGGBB | 0xNNNN>
+        Example: color #FF0000
+        Example: color 0xF800"""
+        if not arg.strip():
+            print("  Usage: color <#RRGGBB | 0xNNNN>")
+            return
+        try:
+            val = arg.strip()
+            if val.startswith("#"):
+                color = hex_color_to_565(val)
+                r, g, b = rgb565_to_rgb(color)
+                print(f"  #{val.lstrip('#')} -> RGB565 0x{color:04X} (R={r} G={g} B={b})")
+            else:
+                color = int(val, 0)
+                r, g, b = rgb565_to_rgb(color)
+                print(f"  0x{color:04X} = R={r} G={g} B={b}")
+            self.dev.set_screen_element(color=color)
+            print(f"  Color set to 0x{color:04X}")
+        except Exception as e:
+            print(f"  ERROR: {e}")
+
+    def do_heartbeat(self, _arg: str):
+        """Send SYS_INFO + SETTING heartbeat pair."""
+        try:
+            self.dev.send_heartbeat()
+            print("  Heartbeat sent (SYS_INFO + SETTING)")
         except Exception as e:
             print(f"  ERROR: {e}")
 
@@ -365,6 +425,21 @@ def main(argv: list[str] | None = None):
     p_pos.add_argument("--refresh", action="store_true",
                         help="Send display refresh after setting")
 
+    # sys-info
+    sub.add_parser("sys-info", help="Query SYS_INFO from device")
+
+    # display-size
+    sub.add_parser("display-size", help="Show display dimensions")
+
+    # color
+    p_color = sub.add_parser("color", help="Set screen element color")
+    p_color.add_argument("value", help="Color as #RRGGBB or 0xNNNN")
+    p_color.add_argument("--index", type=lambda v: int(v, 0), default=0x0F,
+                          help="Element index (default: 0x0F)")
+
+    # heartbeat
+    sub.add_parser("heartbeat", help="Send SYS_INFO + SETTING heartbeat")
+
     # analyze
     p_analyze = sub.add_parser("analyze", help="Analyze a pcapng capture file")
     p_analyze.add_argument("file", help="Path to .pcapng file")
@@ -450,6 +525,33 @@ def main(argv: list[str] | None = None):
             if args.refresh:
                 dev.refresh_display()
                 print("✅ Display refreshed")
+
+        elif args.command == "sys-info":
+            si = dev.get_sys_info()
+            print(f"SYS_INFO: {si}")
+            if args.verbose and si.raw:
+                print(f"Raw: {si.raw[:44].hex(' ')}")
+
+        elif args.command == "display-size":
+            w, h = dev.get_display_size()
+            print(f"Display: {w}x{h} pixels")
+
+        elif args.command == "color":
+            val = args.value
+            if val.startswith("#"):
+                color = hex_color_to_565(val)
+                r, g, b = rgb565_to_rgb(color)
+                print(f"#{val.lstrip('#')} -> RGB565 0x{color:04X} (R={r} G={g} B={b})")
+            else:
+                color = int(val, 0)
+                r, g, b = rgb565_to_rgb(color)
+                print(f"0x{color:04X} = R={r} G={g} B={b}")
+            dev.set_screen_element(color=color, element_index=args.index)
+            print(f"✅ Color set to 0x{color:04X}")
+
+        elif args.command == "heartbeat":
+            dev.send_heartbeat()
+            print("✅ Heartbeat sent (SYS_INFO + SETTING)")
 
         elif args.command == "save":
             dev.save()
