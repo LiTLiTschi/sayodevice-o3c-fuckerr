@@ -28,6 +28,7 @@ class CaptureScreen(Screen):
         Binding("b", "take_baseline", "Baseline", show=True),
         Binding("n", "take_snapshot", "Snapshot", show=True),
         Binding("l", "label_save", "Label+Save", show=True),
+        Binding("f4", "ai_analyze", "AI Analyze", show=True),
     ]
 
     DEFAULT_CSS = """
@@ -79,6 +80,22 @@ class CaptureScreen(Screen):
     #label-input {
         width: 1fr;
     }
+    #ai-panel {
+        border: solid $success;
+        margin: 0 1;
+        height: auto;
+        max-height: 12;
+        display: none;
+    }
+    #ai-title {
+        padding: 0 1;
+        text-style: bold;
+        color: $success;
+    }
+    #ai-content {
+        padding: 0 1;
+        min-height: 3;
+    }
     """
 
     def __init__(self):
@@ -86,6 +103,7 @@ class CaptureScreen(Screen):
         self._baseline: Snapshot | None = None
         self._latest: Snapshot | None = None
         self._changes: list[FieldChange] = []
+        self._last_discovery: Discovery | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -93,7 +111,8 @@ class CaptureScreen(Screen):
         with VerticalScroll(id="capture-body"):
             yield Static(
                 "[bold]B[/bold] Baseline  [bold]N[/bold] Snapshot  "
-                "[bold]L[/bold] Label+Save  [bold]Esc[/bold] Back",
+                "[bold]L[/bold] Label+Save  [bold]F4[/bold] AI Analyze  "
+                "[bold]Esc[/bold] Back",
             )
             yield Static("Hex View", classes="panel-title")
             with Vertical(id="hex-panel"):
@@ -104,6 +123,9 @@ class CaptureScreen(Screen):
             with Horizontal(id="label-row"):
                 yield Static("What did you change?", id="label-prompt")
                 yield Input(placeholder="e.g. Set X position to 120", id="label-input")
+            with Vertical(id="ai-panel"):
+                yield Static("AI Analysis", id="ai-title")
+                yield RichLog(id="ai-content", highlight=True, markup=True)
             yield RichLog(id="capture-log", highlight=True, markup=True)
         yield Footer()
 
@@ -265,6 +287,7 @@ class CaptureScreen(Screen):
                 after=self._latest,
                 changed_fields=self._changes,
             )
+            self._last_discovery = discovery
             path = save_discovery(discovery)
             self.app.call_from_thread(
                 log.write, f"[green]Saved![/green] {path}"
@@ -277,6 +300,68 @@ class CaptureScreen(Screen):
 
         except Exception as e:
             self.app.call_from_thread(log.write, f"[red]Save error:[/red] {e}")
+
+    # ---- AI Analysis ----
+
+    def action_ai_analyze(self) -> None:
+        if not self._changes:
+            self.query_one("#capture-log", RichLog).write(
+                "[yellow]No changes to analyze. Take baseline (B) then snapshot (N) first.[/yellow]"
+            )
+            return
+        self._do_ai_analyze()
+
+    @work(thread=True)
+    def _do_ai_analyze(self) -> None:
+        log = self.query_one("#capture-log", RichLog)
+        from ..claude import is_claude_available, analyze_diff, format_discovery_for_claude
+
+        if not is_claude_available():
+            self.app.call_from_thread(
+                log.write,
+                "[yellow]Claude CLI not found.[/yellow] Install it and log in with "
+                "a Pro/Max account, then try again.\n"
+                "[dim]  npm install -g @anthropic-ai/claude-code[/dim]"
+            )
+            return
+
+        # Build discovery from current state if not saved yet
+        discovery = self._last_discovery
+        if discovery is None:
+            label = self.query_one("#label-input", Input).value.strip()
+            if not label:
+                label = f"Discovery at {time.strftime('%Y-%m-%d %H:%M:%S')}"
+            discovery = Discovery(
+                description=label,
+                before=self._baseline,
+                after=self._latest,
+                changed_fields=self._changes,
+            )
+
+        self.app.call_from_thread(log.write, "[bold]Sending diff to Claude...[/bold] (this may take ~30s)")
+
+        try:
+            analysis = analyze_diff(discovery)
+            discovery.ai_analysis = analysis
+            self._last_discovery = discovery
+
+            # Save updated discovery with AI analysis
+            save_discovery(discovery)
+
+            def show_analysis():
+                panel = self.query_one("#ai-panel")
+                panel.styles.display = "block"
+                ai_log = self.query_one("#ai-content", RichLog)
+                ai_log.clear()
+                ai_log.write(analysis)
+
+            self.app.call_from_thread(show_analysis)
+            self.app.call_from_thread(
+                log.write, "[green]AI analysis complete![/green] See panel above."
+            )
+
+        except Exception as e:
+            self.app.call_from_thread(log.write, f"[red]AI error:[/red] {e}")
 
     # ---- Helpers ----
 
