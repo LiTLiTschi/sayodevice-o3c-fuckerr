@@ -50,6 +50,60 @@ from .protocol import (
 # ============================================================
 
 @dataclass
+class ButtonState:
+    """Current state of all device buttons and knob.
+
+    Decoded from KEY_STATUS (CMD 0x1E, index=0) byte [8].
+    Active-low bitmask: bit=0 means pressed, bit=1 means released.
+
+    Bit layout::
+
+        Bit 0 (0x01): button1    (left button)
+        Bit 1 (0x02): button2    (middle button)
+        Bit 2 (0x04): button3    (right button)
+        Bit 3 (0x08): knob_click (knob press)
+        Bit 4 (0x10): knob_left  (knob rotate left)
+        Bit 5 (0x20): knob_right (knob rotate right)
+    """
+    button1: bool = False
+    button2: bool = False
+    button3: bool = False
+    knob_click: bool = False
+    knob_left: bool = False
+    knob_right: bool = False
+    raw: int = 0x3F
+
+    @classmethod
+    def from_byte(cls, b: int) -> ButtonState:
+        """Decode active-low bitmask byte into ButtonState."""
+        return cls(
+            button1=not bool(b & 0x01),
+            button2=not bool(b & 0x02),
+            button3=not bool(b & 0x04),
+            knob_click=not bool(b & 0x08),
+            knob_left=not bool(b & 0x10),
+            knob_right=not bool(b & 0x20),
+            raw=b,
+        )
+
+    @property
+    def any_pressed(self) -> bool:
+        """True if any button or knob input is active."""
+        return (self.button1 or self.button2 or self.button3
+                or self.knob_click or self.knob_left or self.knob_right)
+
+    def __str__(self) -> str:
+        pressed = []
+        if self.button1: pressed.append("btn1")
+        if self.button2: pressed.append("btn2")
+        if self.button3: pressed.append("btn3")
+        if self.knob_click: pressed.append("knob_click")
+        if self.knob_left: pressed.append("knob_left")
+        if self.knob_right: pressed.append("knob_right")
+        return f"ButtonState({', '.join(pressed) or 'none'})"
+
+
+@dataclass
 class DeviceInfo:
     """Parsed response from Info command (0x00)."""
     model_code: int = 0
@@ -479,6 +533,29 @@ class SayoDevice:
             Raw response bytes or None.
         """
         return self.send_single(CmdId.KEY_STATUS, index=key_index)
+
+    def get_buttons(self) -> ButtonState:
+        """
+        Liest den aktuellen Tastenstatus aller Buttons und des Drehreglers.
+
+        Sendet KEY_STATUS (CMD 0x1E, index=0) und dekodiert Byte [8]
+        als aktiv-niedrige Bitmaske (0 = gedrückt, 1 = losgelassen).
+
+        Returns:
+            ButtonState: Objekt mit bool-Feldern für jeden Button/Knob.
+
+        Beispiel::
+
+            btns = dev.get_buttons()
+            if btns.button1:
+                print("Button 1 is pressed!")
+            if btns.knob_right:
+                print("Knob turned right")
+        """
+        resp = self.send_single(CmdId.KEY_STATUS, index=0)
+        if resp and len(resp) > 8:
+            return ButtonState.from_byte(resp[8])
+        return ButtonState()
 
     def get_sys_info(self) -> SysInfo:
         """

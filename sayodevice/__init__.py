@@ -79,7 +79,7 @@ from .protocol import (
 )
 
 # --- Device layer ---
-from .device import SayoDevice, SayoInterface, DeviceInfo
+from .device import SayoDevice, SayoInterface, DeviceInfo, ButtonState
 
 # --- Analyzer (kept: decode engine, removed: pcapng parser) ---
 from .analyzer import decode_raw_response, analyze_commands
@@ -124,6 +124,7 @@ from .listener import (
     DeviceEvent,
     FnChangeEvent,
     InfoUpdateEvent,
+    ButtonEvent,
     RawPacketEvent,
 )
 
@@ -159,6 +160,7 @@ __all__ = [
     "SayoDevice",
     "SayoInterface",
     "DeviceInfo",
+    "ButtonState",
     # Analyzer
     "decode_raw_response",
     "analyze_commands",
@@ -192,6 +194,7 @@ __all__ = [
     "DeviceEvent",
     "FnChangeEvent",
     "InfoUpdateEvent",
+    "ButtonEvent",
     "RawPacketEvent",
     # Live USB sniffer
     "find_tshark",

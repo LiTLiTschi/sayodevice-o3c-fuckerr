@@ -448,6 +448,14 @@ class SayoREPL(cmd.Cmd):
 
         print(f"\n  --- Now press buttons! Monitoring for {duration:.0f}s ---\n")
 
+        # Noisy bytes to ignore in diffs:
+        # [2-3] = packet checksum (always changes when any field changes)
+        # [18]  = cpu_s uptime seconds counter
+        # [19]  = cpu_ms uptime sub-second counter
+        info_ignore = {2, 3, 18, 19}
+        # KEY_STATUS also has checksum at [2-3]
+        key_ignore = {2, 3}
+
         start = time.time()
         event_count = 0
         try:
@@ -464,39 +472,39 @@ class SayoREPL(cmd.Cmd):
                 except Exception:
                     pass
 
-                # 2. Poll INFO and diff
+                # 2. Poll INFO and diff (ignoring checksum + uptime noise)
                 try:
                     info_resp = self.dev.send_single(CmdId.INFO)
                     if info_resp and info_baseline:
                         info_bytes = bytes(info_resp)
-                        if info_bytes != info_baseline:
+                        diffs = []
+                        for i in range(min(len(info_bytes), len(info_baseline))):
+                            if i not in info_ignore and info_bytes[i] != info_baseline[i]:
+                                diffs.append(f"[{i}]: 0x{info_baseline[i]:02X}->0x{info_bytes[i]:02X}")
+                        if diffs:
                             event_count += 1
-                            # Show which bytes changed
-                            diffs = []
-                            for i in range(min(len(info_bytes), len(info_baseline))):
-                                if info_bytes[i] != info_baseline[i]:
-                                    diffs.append(f"[{i}]: 0x{info_baseline[i]:02X}->0x{info_bytes[i]:02X}")
                             print(f"  [{elapsed:6.2f}s] INFO CHANGED: {', '.join(diffs[:10])}")
-                            info_baseline = info_bytes
+                        info_baseline = info_bytes
                 except Exception:
                     pass
 
-                # 3. Poll KEY_STATUS for each index and diff
+                # 3. Poll KEY_STATUS for each index and diff (ignoring checksum)
                 for ki in range(max_key):
                     try:
                         resp = self.dev.send_single(CmdId.KEY_STATUS, index=ki)
                         if resp:
                             resp_bytes = bytes(resp)
                             bl = baselines.get(ki)
-                            if bl and resp_bytes != bl:
-                                event_count += 1
+                            if bl:
                                 diffs = []
                                 for i in range(min(len(resp_bytes), len(bl))):
-                                    if resp_bytes[i] != bl[i]:
+                                    if i not in key_ignore and resp_bytes[i] != bl[i]:
                                         diffs.append(f"[{i}]: 0x{bl[i]:02X}->0x{resp_bytes[i]:02X}")
-                                print(f"  [{elapsed:6.2f}s] KEY_STATUS[{ki}] CHANGED: {', '.join(diffs[:10])}")
-                                print(f"    full: {resp_bytes[:48].hex(' ')}")
-                                baselines[ki] = resp_bytes
+                                if diffs:
+                                    event_count += 1
+                                    print(f"  [{elapsed:6.2f}s] KEY_STATUS[{ki}] CHANGED: {', '.join(diffs[:10])}")
+                                    print(f"    full: {resp_bytes[:48].hex(' ')}")
+                            baselines[ki] = resp_bytes
                     except Exception:
                         pass
 
