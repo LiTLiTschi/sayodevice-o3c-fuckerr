@@ -397,6 +397,121 @@ class SayoREPL(cmd.Cmd):
             marker = " ◄" if iface.is_config else ""
             print(f"  [{i}] {iface}{marker}")
 
+    def do_button_probe(self, arg: str):
+        """Probe for button press detection. Press buttons on device while running.
+        Usage: button_probe [seconds] [max_key_index]
+        Example: button_probe 30
+        Example: button_probe 60 8
+        Press Ctrl+C to stop early."""
+        parts = arg.split()
+        duration = float(parts[0]) if parts else 30.0
+        max_key = int(parts[1]) if len(parts) > 1 else 4
+
+        print(f"  === Button Probe ({duration:.0f}s) ===")
+        print(f"  Polling KEY_STATUS (0x1E) for key indices 0..{max_key-1}")
+        print(f"  + INFO (0x00) for FN/status fields")
+        print(f"  + receive() for unsolicited packets")
+        print(f"  Press buttons on the device NOW! Ctrl+C to stop.\n")
+
+        # Collect baselines
+        baselines = {}
+        info_baseline = None
+
+        print("  Capturing baselines (don't press anything)...")
+        time.sleep(0.5)
+
+        # Drain any pending data
+        for _ in range(5):
+            self.dev.receive(timeout_ms=50)
+
+        # Baseline INFO
+        try:
+            info_resp = self.dev.send_single(CmdId.INFO)
+            if info_resp:
+                info_baseline = bytes(info_resp)
+                print(f"  INFO baseline: {info_baseline[:32].hex(' ')}")
+        except Exception as e:
+            print(f"  INFO baseline failed: {e}")
+
+        # Baseline KEY_STATUS for each index
+        for ki in range(max_key):
+            try:
+                resp = self.dev.send_single(CmdId.KEY_STATUS, index=ki)
+                if resp:
+                    baselines[ki] = bytes(resp)
+                    # Show first 32 bytes of each
+                    print(f"  KEY_STATUS[{ki}] baseline: {baselines[ki][:32].hex(' ')}")
+                else:
+                    print(f"  KEY_STATUS[{ki}] baseline: (no response)")
+            except Exception as e:
+                print(f"  KEY_STATUS[{ki}] baseline failed: {e}")
+
+        print(f"\n  --- Now press buttons! Monitoring for {duration:.0f}s ---\n")
+
+        start = time.time()
+        event_count = 0
+        try:
+            while time.time() - start < duration:
+                elapsed = time.time() - start
+
+                # 1. Check for unsolicited packets first
+                try:
+                    unsolicited = self.dev.receive(timeout_ms=20)
+                    if unsolicited:
+                        event_count += 1
+                        print(f"  [{elapsed:6.2f}s] UNSOLICITED ({len(unsolicited)}B): "
+                              f"{bytes(unsolicited)[:64].hex(' ')}")
+                except Exception:
+                    pass
+
+                # 2. Poll INFO and diff
+                try:
+                    info_resp = self.dev.send_single(CmdId.INFO)
+                    if info_resp and info_baseline:
+                        info_bytes = bytes(info_resp)
+                        if info_bytes != info_baseline:
+                            event_count += 1
+                            # Show which bytes changed
+                            diffs = []
+                            for i in range(min(len(info_bytes), len(info_baseline))):
+                                if info_bytes[i] != info_baseline[i]:
+                                    diffs.append(f"[{i}]: 0x{info_baseline[i]:02X}->0x{info_bytes[i]:02X}")
+                            print(f"  [{elapsed:6.2f}s] INFO CHANGED: {', '.join(diffs[:10])}")
+                            info_baseline = info_bytes
+                except Exception:
+                    pass
+
+                # 3. Poll KEY_STATUS for each index and diff
+                for ki in range(max_key):
+                    try:
+                        resp = self.dev.send_single(CmdId.KEY_STATUS, index=ki)
+                        if resp:
+                            resp_bytes = bytes(resp)
+                            bl = baselines.get(ki)
+                            if bl and resp_bytes != bl:
+                                event_count += 1
+                                diffs = []
+                                for i in range(min(len(resp_bytes), len(bl))):
+                                    if resp_bytes[i] != bl[i]:
+                                        diffs.append(f"[{i}]: 0x{bl[i]:02X}->0x{resp_bytes[i]:02X}")
+                                print(f"  [{elapsed:6.2f}s] KEY_STATUS[{ki}] CHANGED: {', '.join(diffs[:10])}")
+                                print(f"    full: {resp_bytes[:48].hex(' ')}")
+                                baselines[ki] = resp_bytes
+                    except Exception:
+                        pass
+
+                time.sleep(0.02)  # ~50Hz poll rate
+
+        except KeyboardInterrupt:
+            pass
+
+        elapsed = time.time() - start
+        print(f"\n  === Done. {event_count} change(s) detected in {elapsed:.1f}s ===")
+        if event_count == 0:
+            print("  No changes detected. Buttons may report on a different HID interface.")
+            print("  Try: interfaces  (to see all HID interfaces)")
+            print("  The standard keyboard/consumer interfaces may carry button events.")
+
     def do_setup(self, arg: str):
         """Manage named device setups. Usage: setup <list|show|apply> [name]
         Examples:
