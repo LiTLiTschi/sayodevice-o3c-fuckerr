@@ -42,6 +42,7 @@ from .protocol import (
     DeviceSetting,
     parse_sys_info,
     parse_setting,
+    hex_color_to_565,
 )
 
 # ============================================================
@@ -316,13 +317,20 @@ class SayoDevice:
         """
         return self.send_single(CmdId.SAVE, wait_response=True)
 
+    @staticmethod
+    def _resolve_color(color: int | str) -> int:
+        """Convert color to RGB565. Accepts int or '#RRGGBB' string."""
+        if isinstance(color, str):
+            return hex_color_to_565(color)
+        return color
+
     def set_screen_element(
         self,
         x: int = 0,
         y: int = 0,
         width: int = 40,
         height: int = 40,
-        color: int = 0xFFFF,
+        color: int | str = 0xFFFF,
         element_type: int = 1,
         element_index: int = 0x0F,
         refresh: bool = False,
@@ -330,27 +338,26 @@ class SayoDevice:
         """
         Set screen element properties via SCREEN_MAIN (CMD 0x22).
 
-        Diese Methode setzt die Position und Eigenschaften eines Screen-Elements auf dem Gerät.
-
         Args:
-            x (int): X-Position in Pixeln (0-65535).
-            y (int): Y-Position in Pixeln (0-65535).
-            width (int): Breite des Elements in Pixeln.
-            height (int): Höhe des Elements in Pixeln.
-            color (int): Farbwert (0xFFFF = weiß).
-            element_type (int): Elementtyp (1 = Pure Color).
-            element_index (int): Index des Elements/Fn (z.B. 0x0F).
-            refresh (bool): Wenn True, wird nach dem Setzen ein Display-Refresh ausgeführt.
+            x: X-Position in Pixeln (0-65535).
+            y: Y-Position in Pixeln (0-65535).
+            width: Breite des Elements in Pixeln.
+            height: Höhe des Elements in Pixeln.
+            color: RGB565 int oder '#RRGGBB' String (z.B. '#FF0000' für Rot).
+            element_type: Elementtyp (1 = Pure Color).
+            element_index: Index des Elements/Fn (z.B. 0x0F).
+            refresh: Wenn True, wird nach dem Setzen ein Display-Refresh ausgeführt.
 
         Returns:
             Response bytes oder None.
 
-        Beispiel:
-            dev.set_screen_element(x=120, y=40, element_index=0x0F, refresh=True)
+        Beispiel::
+
+            dev.set_screen_element(x=120, color='#FF0000', refresh=True)
         """
         data = build_screen_element(
             x=x, y=y, width=width, height=height,
-            color=color, element_type=element_type,
+            color=self._resolve_color(color), element_type=element_type,
         )
         resp = self.send_single(
             CmdId.SCREEN_MAIN, data, index=element_index,
@@ -370,6 +377,108 @@ class SayoDevice:
             dev.refresh_display()
         """
         return self.send_single(CmdId.DISPLAY)
+
+    # ---- Convenience screen helpers ----
+
+    def fill_screen(
+        self,
+        color: int | str = 0xFFFF,
+        layer: int = 14,
+        refresh: bool = True,
+    ) -> bytes | None:
+        """
+        Fill the entire display with a solid color.
+
+        Args:
+            color: RGB565 int oder '#RRGGBB' String.
+            layer: Screen-Element-Index (Standard: 14 = Hintergrund).
+            refresh: Display nach dem Setzen aktualisieren.
+
+        Beispiel::
+
+            dev.fill_screen('#1295FF')
+        """
+        return self.set_screen_element(
+            x=0, y=0, width=160, height=80,
+            color=color, element_index=layer, refresh=refresh,
+        )
+
+    def draw_rect(
+        self,
+        x: int,
+        y: int,
+        width: int = 40,
+        height: int = 40,
+        color: int | str = 0xFFFF,
+        layer: int = 15,
+        refresh: bool = True,
+    ) -> bytes | None:
+        """
+        Draw a colored rectangle on the display.
+
+        Args:
+            x: X-Position in Pixeln.
+            y: Y-Position in Pixeln.
+            width: Breite in Pixeln (Standard: 40).
+            height: Höhe in Pixeln (Standard: 40).
+            color: RGB565 int oder '#RRGGBB' String.
+            layer: Screen-Element-Index (Standard: 15 = Vordergrund).
+            refresh: Display nach dem Setzen aktualisieren.
+
+        Beispiel::
+
+            dev.draw_rect(40, 0, 40, 40, '#FF0000')
+        """
+        return self.set_screen_element(
+            x=x, y=y, width=width, height=height,
+            color=color, element_index=layer, refresh=refresh,
+        )
+
+    def clear_layer(self, layer: int = 15, refresh: bool = True) -> bytes | None:
+        """
+        Clear a screen layer (set element_type=0).
+
+        Args:
+            layer: Screen-Element-Index zum Löschen.
+            refresh: Display nach dem Löschen aktualisieren.
+
+        Beispiel::
+
+            dev.clear_layer(15)
+        """
+        return self.set_screen_element(
+            element_type=0, element_index=layer, refresh=refresh,
+        )
+
+    # ---- Input / status queries ----
+
+    def get_fn(self) -> int:
+        """
+        Get current FN layer number.
+
+        Returns:
+            int: Aktuelle FN-Nummer (z.B. 0, 1, 2...).
+
+        Beispiel::
+
+            fn = dev.get_fn()  # -> 0
+        """
+        return self.get_info().fn
+
+    def get_key_status(self, key_index: int = 0) -> bytes | None:
+        """
+        Query key status (CMD 0x1E).
+
+        Returns raw response — protocol for this command is not yet
+        fully decoded. Useful for experimentation.
+
+        Args:
+            key_index: Which key to query.
+
+        Returns:
+            Raw response bytes or None.
+        """
+        return self.send_single(CmdId.KEY_STATUS, index=key_index)
 
     def get_sys_info(self) -> SysInfo:
         """
