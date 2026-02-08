@@ -29,7 +29,7 @@ from .protocol import (
     rgb565_to_rgb,
 )
 from .device import SayoDevice, SayoInterface
-from .analyzer import analyze_pcapng
+from .analyzer import analyze_pcapng, decode_raw_response
 
 
 # ============================================================
@@ -188,23 +188,59 @@ class SayoREPL(cmd.Cmd):
         except Exception as e:
             print(f"  ERROR: {e}")
 
-    def do_analyze(self, arg: str):
-        """Analyze a pcapng capture file. Usage: analyze <file.pcapng> [--device N]
-        Example: analyze capture.pcapng
-        Example: analyze capture.pcapng --device 3"""
+    def do_capture(self, arg: str):
+        """Probe all known commands and decode responses live.
+        Usage: capture [cmd_ids...]
+        Example: capture              (probes INFO, SYS_INFO, SETTING, DEVICE_NAME)
+        Example: capture 0x02 0x03    (probes SYS_INFO and SETTING only)"""
         parts = arg.split()
-        if not parts:
-            print("  Usage: analyze <file.pcapng> [--device N]")
-            return
+        if parts:
+            cmd_ids = [int(p, 0) for p in parts]
+        else:
+            cmd_ids = [
+                CmdId.INFO,
+                CmdId.SYS_INFO,
+                CmdId.SETTING,
+                CmdId.DEVICE_NAME,
+            ]
         try:
-            filepath = parts[0]
-            device = None
-            if "--device" in parts:
-                idx = parts.index("--device")
-                if idx + 1 < len(parts):
-                    device = int(parts[idx + 1])
-            report = analyze_pcapng(filepath, device=device)
-            print(report)
+            print(f"  {'=' * 50}")
+            print(f"  Live Capture — probing {len(cmd_ids)} command(s)")
+            print(f"  {'=' * 50}")
+            for cid in cmd_ids:
+                try:
+                    name = CmdId(cid).name
+                except ValueError:
+                    name = f"0x{cid:02X}"
+                print(f"\n  ── {name} (0x{cid:02X}) ──")
+                resp = self.dev.send_single(cid)
+                if resp:
+                    print(decode_raw_response(resp))
+                else:
+                    print("  (no response)")
+        except Exception as e:
+            print(f"  ERROR: {e}")
+
+    def do_sniff(self, arg: str):
+        """Listen for incoming packets and decode them live.
+        Usage: sniff [seconds]
+        Example: sniff 10
+        Press Ctrl+C to stop."""
+        duration = float(arg) if arg.strip() else 10.0
+        print(f"  Sniffing for {duration:.0f}s (Ctrl+C to stop)...")
+        try:
+            start = time.time()
+            count = 0
+            while time.time() - start < duration:
+                resp = self.dev.receive(timeout_ms=500)
+                if resp:
+                    count += 1
+                    elapsed = time.time() - start
+                    print(f"\n  ── Packet #{count} at {elapsed:.2f}s ──")
+                    print(decode_raw_response(resp))
+            print(f"\n  Done. {count} packet(s) received in {duration:.0f}s")
+        except KeyboardInterrupt:
+            print(f"\n  Stopped. {count} packet(s) received")
         except Exception as e:
             print(f"  ERROR: {e}")
 
@@ -440,6 +476,11 @@ def main(argv: list[str] | None = None):
     # heartbeat
     sub.add_parser("heartbeat", help="Send SYS_INFO + SETTING heartbeat")
 
+    # capture
+    p_capture = sub.add_parser("capture", help="Probe device and decode all responses live")
+    p_capture.add_argument("cmd_ids", nargs="*", default=[],
+                            help="Command IDs to probe (hex or decimal, default: all known)")
+
     # analyze
     p_analyze = sub.add_parser("analyze", help="Analyze a pcapng capture file")
     p_analyze.add_argument("file", help="Path to .pcapng file")
@@ -552,6 +593,26 @@ def main(argv: list[str] | None = None):
         elif args.command == "heartbeat":
             dev.send_heartbeat()
             print("✅ Heartbeat sent (SYS_INFO + SETTING)")
+
+        elif args.command == "capture":
+            if args.cmd_ids:
+                cmd_ids = [int(c, 0) for c in args.cmd_ids]
+            else:
+                cmd_ids = [CmdId.INFO, CmdId.SYS_INFO, CmdId.SETTING, CmdId.DEVICE_NAME]
+            print(f"{'=' * 50}")
+            print(f"Live Capture — probing {len(cmd_ids)} command(s)")
+            print(f"{'=' * 50}")
+            for cid in cmd_ids:
+                try:
+                    name = CmdId(cid).name
+                except ValueError:
+                    name = f"0x{cid:02X}"
+                print(f"\n── {name} (0x{cid:02X}) ──")
+                resp = dev.send_single(cid)
+                if resp:
+                    print(decode_raw_response(resp))
+                else:
+                    print("(no response)")
 
         elif args.command == "save":
             dev.save()
