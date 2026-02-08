@@ -13,7 +13,7 @@ Quick start::
     #   sayodevice interactive
 """
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 
 from .protocol import (
     UsagePage,
