@@ -8,20 +8,34 @@ Quick start::
     with SayoDevice.open() as dev:
         info = dev.get_info()
         dev.set_key_arg0(128)
-        dev.set_screen_element(x=120, y=40, refresh=True)
+        dev.set_screen_element(x=120, color='#FF0000', refresh=True)
+
+Screen helpers::
+
+    with SayoDevice.open() as dev:
+        dev.fill_screen('#1295FF')              # full background
+        dev.draw_rect(0, 0, 40, 40, '#000000')  # foreground rectangle
+        dev.clear_layer(15)                      # remove foreground
+
+Input & events::
+
+    from sayodevice import SayoDevice, DeviceListener
+
+    with SayoDevice.open() as dev:
+        listener = DeviceListener(dev, poll_interval_ms=50)
+        listener.on_fn_change(lambda e: print(f"FN: {e.old_fn} -> {e.new_fn}"))
+        listener.start()
+        # ... your app loop ...
+        listener.stop()
 
 Capture & diff::
 
-    from sayodevice import capture_snapshot, diff_snapshots, save_discovery
+    from sayodevice import capture_snapshot, diff_snapshots
 
     baseline = capture_snapshot(dev)
     # ... make a change on the device ...
     snapshot = capture_snapshot(dev)
     changes = diff_snapshots(baseline, snapshot)
-
-AI analysis::
-
-    from sayodevice import is_claude_available, analyze_diff
 
 TUI::
 
@@ -29,7 +43,7 @@ TUI::
     # Classic CLI: sayodevice --classic
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # --- Protocol layer ---
 from .protocol import (
