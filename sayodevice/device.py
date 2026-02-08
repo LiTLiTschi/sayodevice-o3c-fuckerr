@@ -388,6 +388,7 @@ class SayoDevice:
         element_type: int = 1,
         element_index: int = 0x0F,
         refresh: bool = False,
+        wait_response: bool = True,
     ) -> bytes | None:
         """
         Set screen element properties via SCREEN_MAIN (CMD 0x22).
@@ -401,6 +402,8 @@ class SayoDevice:
             element_type: Elementtyp (1 = Pure Color).
             element_index: Index des Elements/Fn (z.B. 0x0F).
             refresh: Wenn True, wird nach dem Setzen ein Display-Refresh ausgeführt.
+            wait_response: Wenn False, wird nicht auf eine Antwort gewartet
+                (schneller für Batch-Updates, verhindert Response-Mixing).
 
         Returns:
             Response bytes oder None.
@@ -415,6 +418,7 @@ class SayoDevice:
         )
         resp = self.send_single(
             CmdId.SCREEN_MAIN, data, index=element_index,
+            wait_response=wait_response,
         )
         if refresh:
             self.refresh_display()
@@ -541,6 +545,9 @@ class SayoDevice:
         Sendet KEY_STATUS (CMD 0x1E, index=0) und dekodiert Byte [8]
         als aktiv-niedrige Bitmaske (0 = gedrückt, 1 = losgelassen).
 
+        Vor dem Senden werden veraltete Antworten (von vorherigen Befehlen)
+        aus dem HID-Puffer gelöscht, um Response-Mixing zu vermeiden.
+
         Returns:
             ButtonState: Objekt mit bool-Feldern für jeden Button/Knob.
 
@@ -552,9 +559,15 @@ class SayoDevice:
             if btns.knob_right:
                 print("Knob turned right")
         """
+        # Drain stale responses from previous fire-and-forget commands
+        while self.receive(timeout_ms=1):
+            pass
+
         resp = self.send_single(CmdId.KEY_STATUS, index=0)
         if resp and len(resp) > 8:
-            return ButtonState.from_byte(resp[8])
+            # Validate this is actually a KEY_STATUS response (cmd byte at [6])
+            if resp[6] == CmdId.KEY_STATUS:
+                return ButtonState.from_byte(resp[8])
         return ButtonState()
 
     def get_sys_info(self) -> SysInfo:
