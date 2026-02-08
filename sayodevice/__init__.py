@@ -28,6 +28,19 @@ Input & events::
         # ... your app loop ...
         listener.stop()
 
+Named setups::
+
+    from sayodevice import DeviceSetup, ScreenElement, save_setup, load_setup
+
+    setup = DeviceSetup(name="seq-gate", screen_elements=[
+        ScreenElement(x=0, y=0, width=160, height=80, color="#1295FF", element_index=14),
+        ScreenElement(x=0, y=0, width=40, height=40, color="#000000", element_index=15),
+    ])
+    save_setup(setup)
+
+    with SayoDevice.open() as dev:
+        load_setup("seq-gate").apply(dev)
+
 Capture & diff::
 
     from sayodevice import capture_snapshot, diff_snapshots
@@ -93,6 +106,18 @@ from .tui.claude import (
     format_discovery_for_claude,
 )
 
+# --- Named setups ---
+from .setup import (
+    ScreenElement,
+    KeyConfig,
+    DeviceSetup,
+    save_setup,
+    load_setup,
+    list_setups,
+    delete_setup,
+    SETUPS_DIR,
+)
+
 # --- Event listener ---
 from .listener import (
     DeviceListener,
@@ -137,6 +162,15 @@ __all__ = [
     # Analyzer
     "decode_raw_response",
     "analyze_commands",
+    # Named setups
+    "ScreenElement",
+    "KeyConfig",
+    "DeviceSetup",
+    "save_setup",
+    "load_setup",
+    "list_setups",
+    "delete_setup",
+    "SETUPS_DIR",
     # Snapshots & diff
     "Snapshot",
     "Discovery",
