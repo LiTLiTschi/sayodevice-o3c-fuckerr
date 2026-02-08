@@ -35,7 +35,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .device import SayoDevice, DeviceInfo
+from .device import SayoDevice, DeviceInfo, ButtonState
 
 
 # ============================================================
@@ -64,6 +64,19 @@ class InfoUpdateEvent:
 
 
 @dataclass
+class ButtonEvent:
+    """Fired when a button or knob state changes."""
+    timestamp: float
+    button: str          # 'button1', 'button2', 'button3', 'knob_click', 'knob_left', 'knob_right'
+    pressed: bool        # True = just pressed, False = just released
+    state: ButtonState   # Full current state of all buttons
+
+    def __str__(self) -> str:
+        action = "pressed" if self.pressed else "released"
+        return f"ButtonEvent({self.button} {action})"
+
+
+@dataclass
 class RawPacketEvent:
     """Fired when an unsolicited packet is received from the device."""
     timestamp: float
@@ -75,7 +88,7 @@ class RawPacketEvent:
 
 
 # Union type for all events
-DeviceEvent = FnChangeEvent | InfoUpdateEvent | RawPacketEvent
+DeviceEvent = FnChangeEvent | InfoUpdateEvent | ButtonEvent | RawPacketEvent
 
 
 # ============================================================
@@ -117,10 +130,12 @@ class DeviceListener:
         # State tracking
         self._last_fn: int | None = None
         self._last_info: DeviceInfo | None = None
+        self._last_buttons: ButtonState | None = None
 
         # Callbacks
         self._fn_callbacks: list[Callable[[FnChangeEvent], None]] = []
         self._info_callbacks: list[Callable[[InfoUpdateEvent], None]] = []
+        self._button_callbacks: list[Callable[[ButtonEvent], None]] = []
         self._raw_callbacks: list[Callable[[RawPacketEvent], None]] = []
 
         # Event queue for manual polling mode
@@ -140,6 +155,10 @@ class DeviceListener:
     def on_info_update(self, callback: Callable[[InfoUpdateEvent], None]) -> None:
         """Register a callback for info poll updates."""
         self._info_callbacks.append(callback)
+
+    def on_button(self, callback: Callable[[ButtonEvent], None]) -> None:
+        """Register a callback for button press/release events."""
+        self._button_callbacks.append(callback)
 
     def on_raw_packet(self, callback: Callable[[RawPacketEvent], None]) -> None:
         """Register a callback for unsolicited raw packets."""
@@ -240,7 +259,29 @@ class DeviceListener:
         except Exception:
             pass  # Device may be busy
 
-        # 2. Read unsolicited packets
+        # 2. Poll button state via KEY_STATUS
+        try:
+            buttons = self._device.get_buttons()
+            if self._last_buttons is not None:
+                # Compare each button field for changes
+                _BUTTON_FIELDS = ('button1', 'button2', 'button3',
+                                  'knob_click', 'knob_left', 'knob_right')
+                for field in _BUTTON_FIELDS:
+                    old_val = getattr(self._last_buttons, field)
+                    new_val = getattr(buttons, field)
+                    if new_val != old_val:
+                        evt = ButtonEvent(
+                            timestamp=now, button=field,
+                            pressed=new_val, state=buttons,
+                        )
+                        events.append(evt)
+                        for cb in self._button_callbacks:
+                            cb(evt)
+            self._last_buttons = buttons
+        except Exception:
+            pass  # Device may be busy
+
+        # 3. Read unsolicited packets
         if self._read_unsolicited:
             try:
                 data = self._device.receive(timeout_ms=10)
@@ -261,3 +302,8 @@ class DeviceListener:
     def last_info(self) -> DeviceInfo | None:
         """Last observed DeviceInfo, or None if not yet polled."""
         return self._last_info
+
+    @property
+    def last_buttons(self) -> ButtonState | None:
+        """Last observed ButtonState, or None if not yet polled."""
+        return self._last_buttons
