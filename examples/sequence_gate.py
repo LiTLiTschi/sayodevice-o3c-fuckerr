@@ -258,6 +258,7 @@ class SequenceGate:
         dev.set_screen_element(
             x=x, y=y, width=width, height=height,
             color=color, element_type=element_type, element_index=index,
+            wait_response=False,
         )
         self.element_states[index] = state
 
@@ -298,7 +299,7 @@ class SequenceGate:
         if inp.get('knob_click'):
             print("[knob_click] Reset")
             for i in range(16):
-                dev.set_screen_element(element_index=i, element_type=0)
+                dev.set_screen_element(element_index=i, element_type=0, wait_response=False)
             self.element_states.clear()
             self.activated_squares.clear()
 
@@ -397,8 +398,9 @@ class SequenceGate:
             dev.set_screen_element(
                 x=0, y=0, width=Theme.SCREEN_WIDTH, height=Theme.SCREEN_HEIGHT,
                 color=Colors.BG, element_type=1, element_index=1,
+                wait_response=False,
             )
-            dev.set_screen_element(element_index=0, element_type=0)
+            dev.set_screen_element(element_index=0, element_type=0, wait_response=False)
 
             # Grid lines (layers 12-15)
             is_16th = Theme.NOTE_SUBDIVISION == "SIXTEENTH"
