@@ -66,6 +66,12 @@ class SayoApp(App):
             self.pop_screen()
         self.push_screen(screen_name)
 
+    def on_unmount(self) -> None:
+        """Clean up any running sniffer processes on exit."""
+        for screen in self.screen_stack:
+            if hasattr(screen, "_sniffer") and screen._sniffer:
+                screen._sniffer.stop()
+
 
 def main() -> None:
     """Entry point for the TUI."""

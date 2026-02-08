@@ -1,4 +1,4 @@
-"""Capture screen — live capture & diff mode."""
+"""Capture screen — live capture & diff mode + live USB sniffing."""
 
 from __future__ import annotations
 
@@ -13,11 +13,13 @@ from textual import work
 
 from ..widgets.hex_view import HexView
 from ..widgets.diff_view import DiffView
+from ..widgets.packet_table import PacketTable
 from ..snapshots import (
     Snapshot, Discovery, FieldChange,
     capture_snapshot, diff_snapshots, get_changed_byte_offsets,
     save_discovery, _cmd_name,
 )
+from ..sniffer import TsharkSniffer, check_sniff_prerequisites
 
 
 class CaptureScreen(Screen):
@@ -27,6 +29,7 @@ class CaptureScreen(Screen):
         Binding("escape", "app.pop_screen", "Back", show=True),
         Binding("b", "take_baseline", "Baseline", show=True),
         Binding("n", "take_snapshot", "Snapshot", show=True),
+        Binding("s", "toggle_sniff", "Sniff", show=True),
         Binding("l", "label_save", "Label+Save", show=True),
         Binding("f4", "ai_analyze", "AI Analyze", show=True),
     ]
@@ -96,6 +99,19 @@ class CaptureScreen(Screen):
         padding: 0 1;
         min-height: 3;
     }
+    #sniff-panel {
+        border: solid $warning;
+        margin: 0 1;
+        height: auto;
+        max-height: 16;
+        display: none;
+    }
+    #sniff-title {
+        text-style: bold;
+        color: $warning;
+        padding: 0 1;
+        display: none;
+    }
     """
 
     def __init__(self):
@@ -104,6 +120,9 @@ class CaptureScreen(Screen):
         self._latest: Snapshot | None = None
         self._changes: list[FieldChange] = []
         self._last_discovery: Discovery | None = None
+        # Sniff state
+        self._sniffer: TsharkSniffer | None = None
+        self._sniff_active: bool = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -111,6 +130,7 @@ class CaptureScreen(Screen):
         with VerticalScroll(id="capture-body"):
             yield Static(
                 "[bold]B[/bold] Baseline  [bold]N[/bold] Snapshot  "
+                "[bold]S[/bold] Sniff  "
                 "[bold]L[/bold] Label+Save  [bold]F4[/bold] AI Analyze  "
                 "[bold]Esc[/bold] Back",
             )
@@ -120,6 +140,9 @@ class CaptureScreen(Screen):
             yield Static("Field Changes", classes="panel-title")
             with Vertical(id="diff-panel"):
                 yield DiffView(id="diff-view")
+            yield Static("Live USB Sniff", id="sniff-title")
+            with Vertical(id="sniff-panel"):
+                yield PacketTable(id="packet-table")
             with Horizontal(id="label-row"):
                 yield Static("What did you change?", id="label-prompt")
                 yield Input(placeholder="e.g. Set X position to 120", id="label-input")
@@ -362,6 +385,94 @@ class CaptureScreen(Screen):
 
         except Exception as e:
             self.app.call_from_thread(log.write, f"[red]AI error:[/red] {e}")
+
+    # ---- Live Sniff ----
+
+    def action_toggle_sniff(self) -> None:
+        """Toggle live USB sniffing on/off."""
+        if self._sniff_active:
+            self._stop_sniff()
+        else:
+            self._start_sniff()
+
+    def _start_sniff(self) -> None:
+        log = self.query_one("#capture-log", RichLog)
+
+        ok, msg = check_sniff_prerequisites()
+        if not ok:
+            log.write(f"[red]Cannot start sniff:[/red] {msg}")
+            return
+
+        # Show the sniff panel
+        self.query_one("#sniff-title").styles.display = "block"
+        self.query_one("#sniff-panel").styles.display = "block"
+        self.query_one("#packet-table", PacketTable).clear_packets()
+
+        log.write("[dim]Starting tshark capture...[/dim]")
+        self._do_sniff()
+
+    @work(thread=True)
+    def _do_sniff(self) -> None:
+        log = self.query_one("#capture-log", RichLog)
+
+        def on_packet(packet, commands):
+            def ui_update():
+                self.query_one("#packet-table", PacketTable).add_packet(
+                    packet, commands
+                )
+                count = self._sniffer.sayo_count if self._sniffer else 0
+                self._update_status(f"Sniffing... {count} SAYO packets captured")
+            self.app.call_from_thread(ui_update)
+
+        def on_error(msg):
+            self.app.call_from_thread(
+                log.write, f"[red]Sniff error:[/red] {msg}"
+            )
+
+        try:
+            self._sniffer = TsharkSniffer(
+                on_packet=on_packet,
+                on_error=on_error,
+            )
+            self._sniffer.start()
+            self._sniff_active = True
+            self.app.call_from_thread(
+                log.write,
+                "[green]Sniffing started.[/green] Use the web GUI to generate "
+                "traffic. Press S to stop.",
+            )
+            self._sniffer.run_blocking()
+        except Exception as e:
+            self.app.call_from_thread(
+                log.write, f"[red]Sniff failed:[/red] {e}"
+            )
+        finally:
+            self._sniff_active = False
+            count = self._sniffer.sayo_count if self._sniffer else 0
+            self.app.call_from_thread(
+                self._update_status,
+                f"Sniff stopped. {count} SAYO packets captured.",
+            )
+
+    def _stop_sniff(self) -> None:
+        if self._sniffer:
+            self._sniffer.stop()
+            count = self._sniffer.sayo_count
+            self._sniffer = None
+        else:
+            count = 0
+        self._sniff_active = False
+        log = self.query_one("#capture-log", RichLog)
+        log.write(
+            f"[yellow]Sniff stopped.[/yellow] Captured {count} SAYO packets."
+        )
+
+    def on_unmount(self) -> None:
+        """Clean up sniffer when leaving screen."""
+        if self._sniffer:
+            self._sniffer.stop()
+            self._sniffer = None
+        self._sniff_active = False
 
     # ---- Helpers ----
 

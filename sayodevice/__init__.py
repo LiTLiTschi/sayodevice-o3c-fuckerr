@@ -93,6 +93,23 @@ from .tui.claude import (
     format_discovery_for_claude,
 )
 
+# --- Event listener ---
+from .listener import (
+    DeviceListener,
+    DeviceEvent,
+    FnChangeEvent,
+    InfoUpdateEvent,
+    RawPacketEvent,
+)
+
+# --- Live USB sniffer ---
+from .tui.sniffer import (
+    find_tshark,
+    list_usb_interfaces,
+    check_sniff_prerequisites,
+    TsharkSniffer,
+)
+
 __all__ = [
     # Version
     "__version__",
@@ -136,4 +153,15 @@ __all__ = [
     "ask_claude",
     "analyze_diff",
     "format_discovery_for_claude",
+    # Event listener
+    "DeviceListener",
+    "DeviceEvent",
+    "FnChangeEvent",
+    "InfoUpdateEvent",
+    "RawPacketEvent",
+    # Live USB sniffer
+    "find_tshark",
+    "list_usb_interfaces",
+    "check_sniff_prerequisites",
+    "TsharkSniffer",
 ]
