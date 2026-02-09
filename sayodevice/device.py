@@ -270,7 +270,7 @@ class SayoDevice:
             raise IOError(f"HID write failed (result={result})")
 
         if wait_response:
-            time.sleep(0.02)
+            time.sleep(0.005)
             return self.receive(timeout_ms)
         return None
 
