@@ -6,6 +6,7 @@ Usage:
     python sequence_gate.py --debug                # keyboard debug input
     python sequence_gate.py --midi                 # with MIDI output (default port)
     python sequence_gate.py --midi --output "port" # specific MIDI output port
+    python sequence_gate.py --midi --verbose-cc    # show CC messages in terminal
 
 Controls (device — sequencer mode):
     Button 1:    cursor left
@@ -222,6 +223,18 @@ def note_name(n: int) -> str:
 # Input Abstraction
 # ============================================================
 
+class _LockedDev:
+    """Thread-safe proxy for SayoDevice — serializes HID access."""
+
+    def __init__(self, dev, lock: threading.Lock):
+        self._dev = dev
+        self._lock = lock
+
+    def set_screen_element(self, **kw):
+        with self._lock:
+            self._dev.set_screen_element(**kw)
+
+
 class InputHandler(ABC):
     @abstractmethod
     def poll(self) -> dict:
@@ -239,11 +252,13 @@ class DeviceInput(InputHandler):
 
     KNOB_COOLDOWN_SEC = 0.025  # 25ms debounce per detent (bounce settles in 5-20ms)
 
-    def __init__(self, device: sayodevice.SayoDevice):
+    def __init__(self, device: sayodevice.SayoDevice,
+                 dev_lock: threading.Lock | None = None):
         self.device = device
+        self.dev_lock = dev_lock or threading.Lock()
         self._buttons = sayodevice.ButtonState()  # latest snapshot from thread
         self._knob_accum = 0  # +N = right, -N = left
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # protects _buttons and _knob_accum
         self._prev_main = sayodevice.ButtonState()  # for button edge detection in poll()
         self._running = True
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
@@ -254,7 +269,12 @@ class DeviceInput(InputHandler):
         prev = sayodevice.ButtonState()
         cooldown = 0.0
         while self._running:
-            btns = self.device.get_buttons()
+            with self.dev_lock:
+                try:
+                    btns = self.device.get_buttons()
+                except OSError:
+                    sleep(0.005)
+                    continue
             now = time()
             if now >= cooldown:
                 if btns.knob_right and not prev.knob_right:
@@ -759,8 +779,17 @@ class CCOutput:
 
     _CURVE_CC = {"linear": 0, "exponential": 63, "logarithmic": 127}
 
-    def __init__(self, channel: int = 15):
+    _CC_NAMES = {
+        102: "Beat", 103: "BPM", 104: "Subdiv",
+        105: "Step0", 106: "Step1", 107: "Step2", 108: "Step3",
+        109: "Step4", 110: "Step5", 111: "Step6", 112: "Step7",
+        113: "AtkTime", 114: "DecTime", 115: "Sustain", 116: "RelTime",
+        117: "AtkCurve", 118: "DecCurve", 119: "RelCurve",
+    }
+
+    def __init__(self, channel: int = 15, verbose: bool = False):
         self.channel = channel
+        self.verbose = verbose
         self._port = None
         self._prev: dict[int, int] = {}
 
@@ -776,6 +805,9 @@ class CCOutput:
             import mido
             self._port.send(mido.Message(
                 'control_change', control=cc, value=value, channel=self.channel))
+        if self.verbose:
+            name = self._CC_NAMES.get(cc, f"CC{cc}")
+            print(f"  [CC] ch{self.channel} {name}={value}")
         self._prev[cc] = value
 
     def send_beat(self, beat: int, force: bool = False) -> None:
@@ -821,7 +853,8 @@ class CCOutput:
 class SequenceGate:
     def __init__(self, bpm: int, use_debug_input: bool = False,
                  midi_output: str = "", midi_input: str = "",
-                 enable_midi: bool = False, cc_channel: int = 15):
+                 enable_midi: bool = False, cc_channel: int = 15,
+                 verbose_cc: bool = False):
         self.bpm = bpm
         self.note_subdivision = Theme.NOTE_SUBDIVISION
         self.beats_per_bar = SUBDIVISION_BEATS_PER_BAR[self.note_subdivision]
@@ -846,16 +879,17 @@ class SequenceGate:
         # Dirty-tracking for screen elements
         self.element_states: dict[int, dict] = {}
 
-        # Input
+        # Input (device lock serializes HID access between poller thread + main thread)
+        self._dev_lock = threading.Lock()
         if use_debug_input:
             self.input: InputHandler = DebugKeyboardInput()
         else:
-            self.input = DeviceInput(self.device)
+            self.input = DeviceInput(self.device, self._dev_lock)
 
         # MIDI
         self.midi = SequencerMidi(output_port=midi_output, input_port=midi_input)
         self._midi_enabled = enable_midi
-        self.cc = CCOutput(channel=cc_channel)
+        self.cc = CCOutput(channel=cc_channel, verbose=verbose_cc)
 
         # ADSR (always available)
         self.adsr_editor: ADSREditor | None = None
@@ -1194,7 +1228,9 @@ class SequenceGate:
         else:
             print("  Device: btn1=left, btn2=toggle, btn3=right, knob=subdiv, click=ADSR")
 
-        with self.device as dev:
+        with self.device as raw_dev:
+            dev = _LockedDev(raw_dev, self._dev_lock)
+
             # Clear all 16 elements for clean state (no stale artifacts)
             self._clear_all_elements(dev)
 
@@ -1278,10 +1314,13 @@ if __name__ == "__main__":
         if idx + 1 < len(sys.argv):
             cc_channel = int(sys.argv[idx + 1])
 
+    verbose_cc = "--verbose-cc" in sys.argv
+
     print("\n" + "=" * 50)
     flags = []
     if use_debug: flags.append("debug")
     if use_midi: flags.append("MIDI")
+    if verbose_cc: flags.append("verbose-cc")
     mode = f" ({', '.join(flags)})" if flags else " (device mode)"
     print(f"Sequence Gate{mode}")
     print("=" * 50 + "\n")
@@ -1293,6 +1332,7 @@ if __name__ == "__main__":
         midi_input=midi_input,
         enable_midi=use_midi,
         cc_channel=cc_channel,
+        verbose_cc=verbose_cc,
     )
     try:
         gate.run()
