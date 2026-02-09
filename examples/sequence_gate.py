@@ -320,69 +320,145 @@ class DebugKeyboardInput(InputHandler):
 # ============================================================
 
 class ADSREditor:
-    """Renders and edits ADSR envelope parameters on the device screen.
+    """Visualizes and edits individual ADSR stages on the device screen.
 
-    Uses 4 vertical bars (40px wide each) filling the 160x80 display:
-        A (green) | D (yellow) | S (blue) | R (red)
+    Shows the actual envelope curve shape as a 12-column bar chart.
+    Each stage (A/D/S/R) gets its own full-screen view.
 
-    The selected parameter has a bright bar; others are dimmed.
-    Knob adjusts the selected value. Buttons cycle selection.
+    Controls:
+        Button 1:    previous stage (A←D←S←R)
+        Button 3:    next stage (A→D→S→R)
+        Button 2:    toggle property (time/value ↔ curve type)
+        Knob:        adjust selected property
+        Knob click:  exit to sequencer
     """
 
-    PARAM_NAMES = ['attack_ms', 'decay_ms', 'sustain', 'release_ms']
-    PARAM_LABELS = ['A', 'D', 'S', 'R']
-    BAR_COLORS = [Theme.ADSR_BAR_A, Theme.ADSR_BAR_D, Theme.ADSR_BAR_S, Theme.ADSR_BAR_R]
-    BAR_COLORS_DIM = [Theme.ADSR_BAR_A_DIM, Theme.ADSR_BAR_D_DIM, Theme.ADSR_BAR_S_DIM, Theme.ADSR_BAR_R_DIM]
+    STAGES = ['attack', 'decay', 'sustain', 'release']
+    STAGE_COLORS = [Theme.ADSR_BAR_A, Theme.ADSR_BAR_D, Theme.ADSR_BAR_S, Theme.ADSR_BAR_R]
+    STAGE_PROPS = {
+        'attack': ['attack_ms', 'attack_curve'],
+        'decay': ['decay_ms', 'decay_curve'],
+        'sustain': ['sustain'],
+        'release': ['release_ms', 'release_curve'],
+    }
+    PROP_LABELS = {
+        'attack_ms': 'A time', 'attack_curve': 'A curve',
+        'decay_ms': 'D time', 'decay_curve': 'D curve',
+        'sustain': 'S level',
+        'release_ms': 'R time', 'release_curve': 'R curve',
+    }
 
-    # Extended params: 4 values + 3 curves (attack_curve, decay_curve, release_curve)
-    EXTENDED_NAMES = ['attack_ms', 'decay_ms', 'sustain', 'release_ms',
-                      'attack_curve', 'decay_curve', 'release_curve']
-    EXTENDED_LABELS = ['A', 'D', 'S', 'R', 'A-curve', 'D-curve', 'R-curve']
+    NUM_BARS = 12
+    BAR_WIDTH = 12
+    BAR_SPACING = 13  # 12px bar + 1px gap
+    MAX_HEIGHT = 72
+    BAR_Y_BOTTOM = 76
 
     def __init__(self, envelope):
         self.envelope = envelope
-        self.selected = 0  # 0-6: A,D,S,R, A-curve, D-curve, R-curve
+        self.stage_idx = 0  # 0=A, 1=D, 2=S, 3=R
+        self.prop_idx = 0   # index into STAGE_PROPS[current_stage]
+        self._prev_b1 = False
+        self._prev_b2 = False
+        self._prev_b3 = False
         self._element_states: dict[int, dict] = {}
 
-    def _param_to_bar_height(self, param_name: str) -> int:
-        """Convert parameter value to bar height (0-76px, leaving 4px margin)."""
-        val = getattr(self.envelope, param_name)
-        if param_name == 'sustain':
-            return int(val * 72)
-        elif param_name == 'release_ms':
-            return int(min(val, 5000) / 5000 * 72)
-        else:  # attack_ms, decay_ms
-            return int(min(val, 2000) / 2000 * 72)
+    def enter(self):
+        """Reset view to Attack stage when entering editor."""
+        self.stage_idx = 0
+        self.prop_idx = 0
+        self._prev_b1 = False
+        self._prev_b2 = False
+        self._prev_b3 = False
+        self._element_states.clear()
+
+    @property
+    def current_stage(self) -> str:
+        return self.STAGES[self.stage_idx]
+
+    @property
+    def current_prop(self) -> str:
+        props = self.STAGE_PROPS[self.current_stage]
+        return props[self.prop_idx % len(props)]
+
+    def _sample_curve(self) -> list[float]:
+        """Sample the current stage's curve at NUM_BARS points."""
+        from sayodevice.adsr import _apply_curve, _apply_curve_inverted
+        env = self.envelope
+        stage = self.current_stage
+        samples = []
+
+        for i in range(self.NUM_BARS):
+            t = i / (self.NUM_BARS - 1)
+
+            if stage == 'attack':
+                val = _apply_curve(t, env.attack_curve)
+            elif stage == 'decay':
+                shaped = _apply_curve_inverted(t, env.decay_curve)
+                val = env.sustain + (1.0 - env.sustain) * shaped
+            elif stage == 'sustain':
+                val = env.sustain
+            elif stage == 'release':
+                shaped = _apply_curve_inverted(t, env.release_curve)
+                val = env.sustain * shaped
+            else:
+                val = 0.0
+
+            samples.append(max(0.0, min(1.0, val)))
+
+        return samples
 
     def _adjust_value(self, direction: int) -> None:
-        """Adjust the selected parameter by one step."""
+        """Adjust the current property by one step."""
         from sayodevice.adsr import CurveType
+        prop = self.current_prop
 
-        param = self.EXTENDED_NAMES[self.selected]
-
-        if param == 'sustain':
+        if prop == 'sustain':
             new_val = max(0.0, min(1.0, self.envelope.sustain + direction * 0.05))
             self.envelope.sustain = round(new_val, 2)
             print(f"  S = {self.envelope.sustain:.2f}")
-        elif param == 'attack_ms':
+        elif prop == 'attack_ms':
             new_val = max(0, min(2000, self.envelope.attack_ms + direction * 50))
             self.envelope.attack_ms = new_val
             print(f"  A = {self.envelope.attack_ms:.0f}ms")
-        elif param == 'decay_ms':
+        elif prop == 'decay_ms':
             new_val = max(0, min(2000, self.envelope.decay_ms + direction * 50))
             self.envelope.decay_ms = new_val
             print(f"  D = {self.envelope.decay_ms:.0f}ms")
-        elif param == 'release_ms':
+        elif prop == 'release_ms':
             new_val = max(0, min(5000, self.envelope.release_ms + direction * 100))
             self.envelope.release_ms = new_val
             print(f"  R = {self.envelope.release_ms:.0f}ms")
-        elif param.endswith('_curve'):
+        elif prop.endswith('_curve'):
             curves = list(CurveType)
-            current = getattr(self.envelope, param)
+            current = getattr(self.envelope, prop)
             idx = curves.index(current)
             new_idx = (idx + direction) % len(curves)
-            setattr(self.envelope, param, curves[new_idx])
-            print(f"  {param} = {curves[new_idx].value}")
+            setattr(self.envelope, prop, curves[new_idx])
+            print(f"  {prop} = {curves[new_idx].value}")
+
+    def _prop_indicator(self) -> tuple[int, str]:
+        """Width and color of the top property indicator bar."""
+        from sayodevice.adsr import CurveType
+        prop = self.current_prop
+
+        if prop == 'attack_ms':
+            return max(2, int(min(self.envelope.attack_ms, 2000) / 2000 * 156)), '#FFFFFF'
+        elif prop == 'decay_ms':
+            return max(2, int(min(self.envelope.decay_ms, 2000) / 2000 * 156)), '#FFFFFF'
+        elif prop == 'release_ms':
+            return max(2, int(min(self.envelope.release_ms, 5000) / 5000 * 156)), '#FFFFFF'
+        elif prop == 'sustain':
+            return max(2, int(self.envelope.sustain * 156)), '#3399FF'
+        elif prop.endswith('_curve'):
+            curve = getattr(self.envelope, prop)
+            colors = {
+                CurveType.LINEAR: '#FFFFFF',
+                CurveType.EXPONENTIAL: '#FF8800',
+                CurveType.LOGARITHMIC: '#00FFFF',
+            }
+            return 156, colors.get(curve, '#FFFFFF')
+        return 2, '#FFFFFF'
 
     def _set_element(self, dev, index: int, element_type: int,
                      x: int = 0, y: int = 0, width: int = 40, height: int = 40,
@@ -400,97 +476,71 @@ class ADSREditor:
         self._element_states[index] = state
 
     def render(self, dev) -> None:
-        """Render the ADSR bar diagram on the device display."""
-        # Background (layer 0)
+        """Render the current stage's curve as a 12-column bar chart."""
+        # Layer 0: background
         self._set_element(dev, 0, 1, 0, 0, 160, 80, Colors.BG)
 
-        # Editing a curve? Show which ADSR value the curve belongs to
-        is_curve_mode = self.selected >= 4
-        curve_bar_idx = self.selected - 4 if is_curve_mode else -1
-        # Map curve index to bar: 0=A-curve→bar0, 1=D-curve→bar1, 2=R-curve→bar3
-        curve_to_bar = {0: 0, 1: 1, 2: 3}
+        # Layers 1-12: curve sample bars
+        samples = self._sample_curve()
+        color = self.STAGE_COLORS[self.stage_idx]
 
-        for i in range(4):
-            bar_h = self._param_to_bar_height(self.PARAM_NAMES[i])
-            bar_x = i * 40
-            bar_y = 76 - bar_h  # bars grow upward from bottom
+        for i, val in enumerate(samples):
+            bar_h = max(1, int(val * self.MAX_HEIGHT))
+            bar_x = i * self.BAR_SPACING + 1
+            bar_y = self.BAR_Y_BOTTOM - bar_h
+            self._set_element(dev, i + 1, 1, bar_x, bar_y, self.BAR_WIDTH, bar_h, color)
 
-            # Choose color: bright if selected, dim otherwise
-            if is_curve_mode:
-                highlight = (curve_to_bar.get(curve_bar_idx) == i)
-            else:
-                highlight = (self.selected == i)
+        # Layer 13: bottom stage indicator (full-width bar in stage color)
+        self._set_element(dev, 13, 1, 0, 77, 160, 3, color)
 
-            color = self.BAR_COLORS[i] if highlight else self.BAR_COLORS_DIM[i]
+        # Layer 14: top property indicator bar
+        bar_w, bar_c = self._prop_indicator()
+        self._set_element(dev, 14, 1, 1, 0, bar_w, 3, bar_c)
 
-            # Bar fill (layer 2-5)
-            if bar_h > 0:
-                self._set_element(dev, i + 2, 1, bar_x + 2, bar_y, 36, bar_h, color)
-            else:
-                self._set_element(dev, i + 2, 1, bar_x + 2, 74, 36, 2, color)
-
-        # Separator lines between bars (layers 6-8)
-        for i in range(3):
-            self._set_element(dev, i + 6, 1, (i + 1) * 40 - 1, 0, 2, 80, '#333333')
-
-        # Selection indicator at bottom (layer 9) — small bright rect
-        if is_curve_mode:
-            bar_idx = curve_to_bar.get(curve_bar_idx, 0)
-        else:
-            bar_idx = self.selected
-        sel_x = bar_idx * 40 + 4
-        self._set_element(dev, 9, 1, sel_x, 77, 32, 3, '#FFFFFF')
-
-        # Curve type indicator (layer 10) — show current curve name with color coding
-        if is_curve_mode:
-            from sayodevice.adsr import CurveType
-            param = self.EXTENDED_NAMES[self.selected]
-            curve_val = getattr(self.envelope, param)
-            # Color-code by curve type: linear=white, exp=orange, log=cyan
-            if curve_val == CurveType.LINEAR:
-                curve_color = '#FFFFFF'
-            elif curve_val == CurveType.EXPONENTIAL:
-                curve_color = '#FF8800'
-            else:
-                curve_color = '#00FFFF'
-            # Small indicator dot at top of selected bar
-            self._set_element(dev, 10, 1, sel_x + 10, 2, 12, 6, curve_color)
-        else:
-            self._set_element(dev, 10, 0, 0, 0, 1, 1, Colors.BG)
-
-        # Clear unused layers (11-15)
-        for i in range(11, 16):
-            self._set_element(dev, i, 0, 0, 0, 1, 1, Colors.BG)
+        # Layer 15: clear
+        self._set_element(dev, 15, 0, 0, 0, 1, 1, Colors.BG)
 
     def process_input(self, inp: dict) -> str | None:
         """Process input while in ADSR editor mode.
 
         Returns:
-            'exit' to leave editor mode, None otherwise.
+            'exit' to leave editor, 'quit' to quit app, None otherwise.
         """
         if inp.get('command') == 'quit':
             return 'quit'
         if inp.get('command') == 'toggle_adsr':
             return 'exit'
 
-        # Button 2 or knob_click: exit editor
-        b2 = inp.get('button2', False)
-        if b2:
+        # Knob click: exit editor
+        if inp.get('knob_click'):
             return 'exit'
 
-        # Button 1: previous parameter
         b1 = inp.get('button1', False)
-        if b1:
-            self.selected = (self.selected - 1) % len(self.EXTENDED_NAMES)
-            print(f"  ADSR: editing {self.EXTENDED_LABELS[self.selected]}")
-
-        # Button 3: next parameter
+        b2 = inp.get('button2', False)
         b3 = inp.get('button3', False)
-        if b3:
-            self.selected = (self.selected + 1) % len(self.EXTENDED_NAMES)
-            print(f"  ADSR: editing {self.EXTENDED_LABELS[self.selected]}")
 
-        # Knob: adjust value
+        # Button 1 edge: previous stage
+        if b1 and not self._prev_b1:
+            self.stage_idx = (self.stage_idx - 1) % 4
+            self.prop_idx = 0
+            print(f"  ADSR: {self.current_stage} [{self.PROP_LABELS[self.current_prop]}]")
+        self._prev_b1 = b1
+
+        # Button 3 edge: next stage
+        if b3 and not self._prev_b3:
+            self.stage_idx = (self.stage_idx + 1) % 4
+            self.prop_idx = 0
+            print(f"  ADSR: {self.current_stage} [{self.PROP_LABELS[self.current_prop]}]")
+        self._prev_b3 = b3
+
+        # Button 2 edge: toggle property (time/value ↔ curve type)
+        if b2 and not self._prev_b2:
+            props = self.STAGE_PROPS[self.current_stage]
+            self.prop_idx = (self.prop_idx + 1) % len(props)
+            print(f"  ADSR: editing {self.PROP_LABELS[self.current_prop]}")
+        self._prev_b2 = b2
+
+        # Knob: adjust selected property
         if inp.get('knob_right'):
             self._adjust_value(1)
         if inp.get('knob_left'):
@@ -697,6 +747,14 @@ class SequenceGate:
             for row in range(Theme.GRID_ROWS):
                 self._envelope_gens[(col, row)] = EnvelopeGenerator(self.envelope)
 
+    def _clear_all_elements(self, dev):
+        """Reset all 16 screen elements to empty. Used between view switches."""
+        for i in range(16):
+            dev.set_screen_element(element_index=i, element_type=0, wait_response=False)
+        self.element_states.clear()
+        if self.adsr_editor:
+            self.adsr_editor._element_states.clear()
+
     def _set_element(self, dev, index: int, element_type: int,
                      x: int = 0, y: int = 0, width: int = 40, height: int = 40,
                      color: str = "#FFFFFF"):
@@ -779,8 +837,9 @@ class SequenceGate:
                 self._in_learn_mode = True
         elif cmd == 'toggle_adsr':
             self._in_adsr_mode = True
-            self.element_states.clear()
-            print("[ADSR] Entering editor")
+            self.adsr_editor.enter()
+            self._clear_all_elements(dev)
+            print("[ADSR] Entering editor — attack")
             return True
 
         # Knob: subdivision control + mode switches
@@ -794,8 +853,9 @@ class SequenceGate:
                 self._in_learn_mode = False
             else:
                 self._in_adsr_mode = True
-                self.element_states.clear()
-                print("[ADSR] Entering editor")
+                self.adsr_editor.enter()
+                self._clear_all_elements(dev)
+                print("[ADSR] Entering editor — attack")
                 return True
 
         now = time()
@@ -915,15 +975,14 @@ class SequenceGate:
 
     def _redraw_sequencer(self, dev):
         """Redraw the full sequencer screen after leaving editor mode."""
-        self.element_states.clear()
+        self._clear_all_elements(dev)
 
-        # Background (layer 1) + clear layer 0
+        # Background (layer 1)
         dev.set_screen_element(
             x=0, y=0, width=Theme.SCREEN_WIDTH, height=Theme.SCREEN_HEIGHT,
             color=Colors.BG, element_type=1, element_index=1,
             wait_response=False,
         )
-        dev.set_screen_element(element_index=0, element_type=0, wait_response=False)
 
         # Grid lines (layers 12-15)
         self._draw_grid_lines(dev)
@@ -968,9 +1027,7 @@ class SequenceGate:
 
         with self.device as dev:
             # Clear all 16 elements for clean state (no stale artifacts)
-            for i in range(16):
-                dev.set_screen_element(element_index=i, element_type=0, wait_response=False)
-            self.element_states.clear()
+            self._clear_all_elements(dev)
 
             # Initial screen setup
             dev.set_screen_element(
@@ -978,7 +1035,6 @@ class SequenceGate:
                 color=Colors.BG, element_type=1, element_index=1,
                 wait_response=False,
             )
-            dev.set_screen_element(element_index=0, element_type=0, wait_response=False)
 
             # Grid lines (layers 12-15)
             self._draw_grid_lines(dev)
