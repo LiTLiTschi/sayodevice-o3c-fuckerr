@@ -10,11 +10,14 @@ Reverse-engineered from Wireshark captures and [khang06's protocol docs](https:/
 # From GitHub (latest)
 pip install git+https://github.com/LiTLiTschi/sayodevice-o3c-fuckerr.git
 
+# With MIDI support
+pip install "sayodevice[midi] @ git+https://github.com/LiTLiTschi/sayodevice-o3c-fuckerr.git"
+
 # From source
 pip install .
 
 # Editable/dev install
-pip install -e .
+pip install -e ".[midi]"
 ```
 
 ## Quick Start
@@ -98,6 +101,52 @@ with SayoDevice.open() as dev:
     dev.refresh_display()
 ```
 
+## ADSR Envelopes
+
+Configurable Attack-Decay-Sustain-Release envelopes with linear, exponential, and logarithmic curves:
+
+```python
+from sayodevice import ADSREnvelope, EnvelopeGenerator, CurveType
+
+env = ADSREnvelope(
+    attack_ms=50, decay_ms=100, sustain=0.8, release_ms=200,
+    attack_curve=CurveType.LINEAR,
+    decay_curve=CurveType.EXPONENTIAL,
+    release_curve=CurveType.EXPONENTIAL,
+)
+
+gen = EnvelopeGenerator(env)
+gen.gate_on()      # Start attack
+val = gen.get_value()  # 0.0 to 1.0
+gen.gate_off()     # Start release
+```
+
+## MIDI Bridge (optional)
+
+Requires `pip install sayodevice[midi]` (mido + python-rtmidi):
+
+```python
+from sayodevice import SayoDevice, DeviceListener
+from sayodevice.midi import MidiBridge, list_midi_ports
+
+# List available ports
+print(list_midi_ports())
+
+# Bridge device buttons to MIDI
+with SayoDevice.open() as dev:
+    listener = DeviceListener(dev, poll_interval_ms=20)
+    bridge = MidiBridge(listener)
+    bridge.map_button('button1', note=60)  # C4
+    bridge.map_button('button2', note=62)  # D4
+    bridge.map_knob(cc=1)                  # Mod wheel
+    bridge.start()
+
+    # ... your app loop ...
+
+    bridge.stop()
+    listener.stop()
+```
+
 ## Named Setups (Presets)
 
 Save and load device configurations as JSON files:
@@ -143,6 +192,13 @@ sayodevice --classic scan
 sayodevice --classic info
 sayodevice --classic set-arg0 128
 sayodevice --classic interactive
+
+# Run a script
+sayodevice run examples/sequence_gate.py --midi --adsr
+
+# MIDI tools
+sayodevice --classic midi ports
+sayodevice --classic midi bridge --note button1:60 --note button2:62 --knob-cc 1
 ```
 
 ### Interactive Console (REPL)
@@ -173,7 +229,7 @@ sayodevice --classic interactive
 
 See the `examples/` directory:
 
-- **`sequence_gate.py`** — 4x2 step sequencer with beat visualization, cursor navigation, and BPM control via knob. Demonstrates `get_buttons()`, screen element tracking, and the input abstraction pattern.
+- **`sequence_gate.py`** — 4x2 step sequencer with beat visualization, cursor navigation, BPM control via knob, MIDI output, ADSR envelope editor, and MIDI learn mode.
 
 ```powershell
 # Run with real device buttons
@@ -181,6 +237,49 @@ python examples/sequence_gate.py
 
 # Debug mode (keyboard input)
 python examples/sequence_gate.py --debug
+
+# With MIDI output (sends notes on each active beat)
+python examples/sequence_gate.py --midi
+
+# With MIDI to a specific port
+python examples/sequence_gate.py --midi --output "loopMIDI Port"
+
+# With ADSR envelope editor (knob click to enter/exit)
+python examples/sequence_gate.py --midi --adsr
+
+# All features
+python examples/sequence_gate.py --midi --adsr --output "loopMIDI Port" --input "MIDI Controller"
+```
+
+### Sequence Gate Controls
+
+**Sequencer mode:**
+| Input | Action |
+|-------|--------|
+| Button 1 | Cursor left |
+| Button 2 | Toggle square on/off |
+| Button 3 | Cursor right |
+| Knob left/right | BPM -/+10 |
+| Knob click | Enter ADSR editor (with --adsr) |
+
+**ADSR editor mode (4 colored bars on screen):**
+| Input | Action |
+|-------|--------|
+| Button 1/3 | Select parameter (A/D/S/R/curves) |
+| Button 2 | Exit editor |
+| Knob left/right | Adjust selected value |
+
+**MIDI learn mode:**
+| Input | Action |
+|-------|--------|
+| Knob click | Toggle learn mode |
+| Button 1/3 | Move cursor to target position |
+| Play MIDI note | Assign note to cursor position |
+
+**Default MIDI note map (4x2 grid):**
+```
+C4  D4  E4  F4
+G4  A4  B4  C5
 ```
 
 ## Protocol Overview

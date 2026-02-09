@@ -56,7 +56,7 @@ TUI::
     # Classic CLI: sayodevice --classic
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # --- Protocol layer ---
 from .protocol import (
@@ -136,6 +136,31 @@ from .tui.sniffer import (
     TsharkSniffer,
 )
 
+# --- ADSR envelopes ---
+from .adsr import (
+    CurveType,
+    ADSREnvelope,
+    EnvelopeGenerator,
+    EnvelopeStage,
+    envelope_to_bars,
+    ADSR_COLORS,
+    ADSR_LABELS,
+    ADSR_PARAM_NAMES,
+    ADSR_PARAM_RANGES,
+)
+
+# --- MIDI bridge (optional: requires mido + python-rtmidi) ---
+try:
+    from .midi import (
+        MidiBridge,
+        MidiMapping,
+        KnobMapping,
+        list_midi_ports,
+    )
+    _MIDI_AVAILABLE = True
+except ImportError:
+    _MIDI_AVAILABLE = False
+
 __all__ = [
     # Version
     "__version__",
@@ -201,4 +226,23 @@ __all__ = [
     "list_usb_interfaces",
     "check_sniff_prerequisites",
     "TsharkSniffer",
+    # ADSR envelopes
+    "CurveType",
+    "ADSREnvelope",
+    "EnvelopeGenerator",
+    "EnvelopeStage",
+    "envelope_to_bars",
+    "ADSR_COLORS",
+    "ADSR_LABELS",
+    "ADSR_PARAM_NAMES",
+    "ADSR_PARAM_RANGES",
 ]
+
+# Conditionally add MIDI exports
+if _MIDI_AVAILABLE:
+    __all__ += [
+        "MidiBridge",
+        "MidiMapping",
+        "KnobMapping",
+        "list_midi_ports",
+    ]
