@@ -42,6 +42,21 @@ Controls (debug):
 MIDI note map (4x2 grid, default):
     (0,0)=C4  (1,0)=D4  (2,0)=E4  (3,0)=F4
     (0,1)=G4  (1,1)=A4  (2,1)=B4  (3,1)=C5
+
+MIDI CC output for Bome MIDI Translator Pro (channel 15 by default):
+    CC 102  Beat position (0-7)              0-126 (step 18)
+    CC 103  BPM (30-300)                     0-127 (linear)
+    CC 104  Subdivision                      0/42/85/127
+    CC 105-112  Grid steps 0-7              0=off, 127=on
+    CC 113  Attack time (0-2000ms)           0-127
+    CC 114  Decay time (0-2000ms)            0-127
+    CC 115  Sustain level (0-100%)           0-127
+    CC 116  Release time (0-5000ms)          0-127
+    CC 117  Attack curve (LIN/EXP/LOG)       0/63/127
+    CC 118  Decay curve                      0/63/127
+    CC 119  Release curve                    0/63/127
+
+    Use --cc-channel N to change from default channel 15.
 """
 
 import sys
@@ -215,47 +230,67 @@ class InputHandler(ABC):
 
 
 class DeviceInput(InputHandler):
-    """Real SAYO device input via get_buttons()."""
+    """Real SAYO device input via threaded USB poller.
+
+    A dedicated thread polls get_buttons() as fast as USB allows (~140Hz).
+    Knob edges are accumulated into an integer counter so that fast turning
+    never loses detents — even when the main loop is busy rendering.
+    """
+
+    KNOB_COOLDOWN_SEC = 0.025  # 25ms debounce per detent (bounce settles in 5-20ms)
 
     def __init__(self, device: sayodevice.SayoDevice):
         self.device = device
-        self._prev = sayodevice.ButtonState()
-        self._knob_cooldown = 0.0  # epoch time when cooldown expires
+        self._buttons = sayodevice.ButtonState()  # latest snapshot from thread
+        self._knob_accum = 0  # +N = right, -N = left
+        self._lock = threading.Lock()
+        self._prev_main = sayodevice.ButtonState()  # for button edge detection in poll()
+        self._running = True
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._thread.start()
+
+    def _poll_loop(self):
+        """Fast USB polling thread — detects knob edges and accumulates them."""
+        prev = sayodevice.ButtonState()
+        cooldown = 0.0
+        while self._running:
+            btns = self.device.get_buttons()
+            now = time()
+            if now >= cooldown:
+                if btns.knob_right and not prev.knob_right:
+                    with self._lock:
+                        self._knob_accum += 1
+                    cooldown = now + self.KNOB_COOLDOWN_SEC
+                elif btns.knob_left and not prev.knob_left:
+                    with self._lock:
+                        self._knob_accum -= 1
+                    cooldown = now + self.KNOB_COOLDOWN_SEC
+            with self._lock:
+                self._buttons = btns
+            prev = btns
 
     def poll(self) -> dict:
-        btns = self.device.get_buttons()
-        prev = self._prev
-        self._prev = btns
-        now = time()
-
-        # Knob encoder debounce: cooldown timer fires one event per
-        # physical detent. After firing, ignore edges for 80ms.
-        # Unlike the armed/idle FSM, this doesn't require seeing idle
-        # state between polls — just wall-clock time.
-        knob_right_edge = False
-        knob_left_edge = False
-
-        if now >= self._knob_cooldown:
-            if btns.knob_right and not prev.knob_right and not btns.knob_left:
-                knob_right_edge = True
-                self._knob_cooldown = now + 0.080
-            elif btns.knob_left and not prev.knob_left and not btns.knob_right:
-                knob_left_edge = True
-                self._knob_cooldown = now + 0.080
-
-        result = {
+        with self._lock:
+            btns = self._buttons
+            accum = self._knob_accum
+            self._knob_accum = 0
+        prev = self._prev_main
+        self._prev_main = btns
+        return {
             'button1': btns.button1,
             'button2': btns.button2,
             'button3': btns.button3,
-            'knob_left': knob_left_edge,
+            'knob_left': accum < 0,
+            'knob_left_count': abs(accum) if accum < 0 else 0,
             'knob_click': btns.knob_click and not prev.knob_click,
-            'knob_right': knob_right_edge,
+            'knob_right': accum > 0,
+            'knob_right_count': accum if accum > 0 else 0,
             'command': None,
         }
-        return result
 
     def stop(self):
-        pass
+        self._running = False
+        self._thread.join(timeout=1.0)
 
 
 class DebugKeyboardInput(InputHandler):
@@ -301,13 +336,17 @@ class DebugKeyboardInput(InputHandler):
                 self.held[btn] = False
                 self.auto_release[btn] = None
 
+        kl = 'k1' in raw
+        kr = 'k3' in raw
         result = {
             'button1': self.held['button1'],
             'button2': self.held['button2'],
             'button3': self.held['button3'],
-            'knob_left': 'k1' in raw,
+            'knob_left': kl,
+            'knob_left_count': 1 if kl else 0,
             'knob_click': 'k2' in raw,
-            'knob_right': 'k3' in raw,
+            'knob_right': kr,
+            'knob_right_count': 1 if kr else 0,
             'command': None,
         }
 
@@ -553,10 +592,10 @@ class ADSREditor:
             print(f"  ADSR: editing {self.PROP_LABELS[self.current_prop]}")
         self._prev_b2 = b2
 
-        # Knob: adjust selected property
-        if inp.get('knob_right'):
+        # Knob: adjust selected property (supports multiple steps per poll)
+        for _ in range(inp.get('knob_right_count', 0)):
             self._adjust_value(1)
-        if inp.get('knob_left'):
+        for _ in range(inp.get('knob_left_count', 0)):
             self._adjust_value(-1)
 
         return None
@@ -696,13 +735,93 @@ class SequencerMidi:
 
 
 # ============================================================
+# MIDI CC Output for Bome MIDI Translator Pro
+# ============================================================
+
+class CCOutput:
+    """Broadcasts sequencer/ADSR state as MIDI CC on a dedicated channel.
+
+    Uses CC 102-119 ("undefined" in MIDI spec). Only sends when a value
+    actually changes. Shares the same mido output port as SequencerMidi.
+    """
+
+    CC_BEAT = 102
+    CC_BPM = 103
+    CC_SUBDIVISION = 104
+    CC_GRID_BASE = 105       # 105-112 for grid steps 0-7
+    CC_ATTACK = 113
+    CC_DECAY = 114
+    CC_SUSTAIN = 115
+    CC_RELEASE = 116
+    CC_ATTACK_CURVE = 117
+    CC_DECAY_CURVE = 118
+    CC_RELEASE_CURVE = 119
+
+    _CURVE_CC = {"linear": 0, "exponential": 63, "logarithmic": 127}
+
+    def __init__(self, channel: int = 15):
+        self.channel = channel
+        self._port = None
+        self._prev: dict[int, int] = {}
+
+    def attach(self, port) -> None:
+        """Attach a mido output port (shared with SequencerMidi)."""
+        self._port = port
+
+    def _send(self, cc: int, value: int, force: bool = False) -> None:
+        value = max(0, min(127, value))
+        if not force and self._prev.get(cc) == value:
+            return
+        if self._port:
+            import mido
+            self._port.send(mido.Message(
+                'control_change', control=cc, value=value, channel=self.channel))
+        self._prev[cc] = value
+
+    def send_beat(self, beat: int, force: bool = False) -> None:
+        self._send(self.CC_BEAT, beat * 18, force)
+
+    def send_bpm(self, bpm: int, force: bool = False) -> None:
+        self._send(self.CC_BPM, int((bpm - 30) / 270 * 127), force)
+
+    def send_subdivision(self, subdivision: str, force: bool = False) -> None:
+        idx = SUBDIVISIONS.index(subdivision)
+        self._send(self.CC_SUBDIVISION, min(127, idx * 42), force)
+
+    def send_grid_step(self, step: int, active: bool, force: bool = False) -> None:
+        self._send(self.CC_GRID_BASE + step, 127 if active else 0, force)
+
+    def send_grid_all(self, activated_squares: set, force: bool = False) -> None:
+        for i in range(8):
+            pos = (i % 4, i // 4)
+            self.send_grid_step(i, pos in activated_squares, force)
+
+    def send_adsr(self, envelope, force: bool = False) -> None:
+        self._send(self.CC_ATTACK, int(min(envelope.attack_ms, 2000) / 2000 * 127), force)
+        self._send(self.CC_DECAY, int(min(envelope.decay_ms, 2000) / 2000 * 127), force)
+        self._send(self.CC_SUSTAIN, int(envelope.sustain * 127), force)
+        self._send(self.CC_RELEASE, int(min(envelope.release_ms, 5000) / 5000 * 127), force)
+        self._send(self.CC_ATTACK_CURVE, self._CURVE_CC.get(envelope.attack_curve.value, 0), force)
+        self._send(self.CC_DECAY_CURVE, self._CURVE_CC.get(envelope.decay_curve.value, 0), force)
+        self._send(self.CC_RELEASE_CURVE, self._CURVE_CC.get(envelope.release_curve.value, 0), force)
+
+    def dump_all(self, beat, bpm, subdivision, activated_squares, envelope) -> None:
+        """Force-send all state (call on startup)."""
+        self.send_beat(beat, force=True)
+        self.send_bpm(bpm, force=True)
+        self.send_subdivision(subdivision, force=True)
+        self.send_grid_all(activated_squares, force=True)
+        self.send_adsr(envelope, force=True)
+
+
+# ============================================================
 # Sequence Gate
 # ============================================================
 
 class SequenceGate:
     def __init__(self, bpm: int, use_debug_input: bool = False,
                  midi_output: str = "", midi_input: str = "",
-                 enable_midi: bool = False):
+                 enable_midi: bool = False, cc_channel: int = 15):
         self.bpm = bpm
         self.note_subdivision = Theme.NOTE_SUBDIVISION
         self.beats_per_bar = SUBDIVISION_BEATS_PER_BAR[self.note_subdivision]
@@ -736,6 +855,7 @@ class SequenceGate:
         # MIDI
         self.midi = SequencerMidi(output_port=midi_output, input_port=midi_input)
         self._midi_enabled = enable_midi
+        self.cc = CCOutput(channel=cc_channel)
 
         # ADSR (always available)
         self.adsr_editor: ADSREditor | None = None
@@ -787,6 +907,8 @@ class SequenceGate:
         self.bpm = max(Theme.MIN_BPM, min(Theme.MAX_BPM, bpm))
         self.ms_between_beats = SUBDIVISION_MS[self.note_subdivision] / self.bpm
         print(f"BPM: {self.bpm}")
+        if self._midi_enabled:
+            self.cc.send_bpm(self.bpm)
 
     def _beat_color(self, activated: bool, is_first: bool) -> str:
         """Color for a square that currently has the beat on it."""
@@ -833,6 +955,8 @@ class SequenceGate:
         self.ms_between_beats = SUBDIVISION_MS[self.note_subdivision] / self.bpm
         print(f"Subdivision: {self.note_subdivision} ({self.beats_per_bar} beats/bar)")
         self._draw_grid_lines(dev)
+        if self._midi_enabled:
+            self.cc.send_subdivision(self.note_subdivision)
 
     def _midi_learn_note(self, note: int, channel: int) -> None:
         """Callback for MIDI learn — assign note to current cursor position."""
@@ -873,10 +997,10 @@ class SequenceGate:
             print("[ADSR] Entering editor — attack")
             return True
 
-        # Knob: subdivision control + mode switches
-        if inp.get('knob_right'):
+        # Knob: subdivision control + mode switches (supports multi-step)
+        for _ in range(inp.get('knob_right_count', 0)):
             self._set_subdivision(1, dev)
-        if inp.get('knob_left'):
+        for _ in range(inp.get('knob_left_count', 0)):
             self._set_subdivision(-1, dev)
         if inp.get('knob_click'):
             if self._in_learn_mode:
@@ -942,6 +1066,10 @@ class SequenceGate:
                 color = Colors.ACTIVATED_BEAT if on_beat else Colors.ACTIVATED
                 self._set_element(dev, idx, 1, pos[0]*40, pos[1]*40, 40, 40, color)
 
+            if self._midi_enabled:
+                step = pos[1] * Theme.GRID_COLS + pos[0]
+                self.cc.send_grid_step(step, pos in self.activated_squares)
+
         elif not b2 and self.prev_button2:
             self.button2_press_time = None
 
@@ -989,6 +1117,9 @@ class SequenceGate:
         is_first = (self.total_beats == 0)
         color = self._beat_color(beat_pos in self.activated_squares, is_first)
         self._set_element(dev, curr_idx, 1, bx*40, by*40, 40, 40, color)
+
+        if self._midi_enabled:
+            self.cc.send_beat(self.current_beat)
 
         # MIDI: trigger note if square is activated
         if beat_pos in self.activated_squares and self._midi_enabled:
@@ -1042,6 +1173,7 @@ class SequenceGate:
         if self._midi_enabled:
             if self.midi.open():
                 print(f"  Note map: {', '.join(f'({k[0]},{k[1]})={note_name(v)}' for k, v in sorted(self.midi.note_map.items()))}")
+                self.cc.attach(self.midi._midi_out)
             else:
                 print("  MIDI disabled (failed to open)")
                 self._midi_enabled = False
@@ -1050,6 +1182,12 @@ class SequenceGate:
         self._init_adsr()
         print(f"  ADSR: A={self.envelope.attack_ms}ms D={self.envelope.decay_ms}ms "
               f"S={self.envelope.sustain:.2f} R={self.envelope.release_ms}ms")
+
+        # Send initial CC state dump
+        if self._midi_enabled:
+            self.cc.dump_all(self.current_beat, self.bpm, self.note_subdivision,
+                             self.activated_squares, self.envelope)
+            print(f"  CC output: channel {self.cc.channel}, CC 102-119")
 
         if isinstance(self.input, DebugKeyboardInput):
             print("  Keys: 1/2/3 buttons, k1/k2/k3 knob, +/- BPM, m learn, e ADSR, q quit")
@@ -1089,9 +1227,13 @@ class SequenceGate:
                         self._in_adsr_mode = False
                         print(f"[ADSR] A={self.envelope.attack_ms}ms D={self.envelope.decay_ms}ms "
                               f"S={self.envelope.sustain:.2f} R={self.envelope.release_ms}ms")
+                        if self._midi_enabled:
+                            self.cc.send_adsr(self.envelope)
                         # Redraw sequencer
                         self._redraw_sequencer(dev)
                     else:
+                        if self._midi_enabled:
+                            self.cc.send_adsr(self.envelope)
                         self.adsr_editor.render(dev)
                 else:
                     # Normal sequencer mode
@@ -1129,6 +1271,13 @@ if __name__ == "__main__":
         if idx + 1 < len(sys.argv):
             midi_input = sys.argv[idx + 1]
 
+    # Parse --cc-channel flag (MIDI CC output channel, default 15)
+    cc_channel = 15
+    if "--cc-channel" in sys.argv:
+        idx = sys.argv.index("--cc-channel")
+        if idx + 1 < len(sys.argv):
+            cc_channel = int(sys.argv[idx + 1])
+
     print("\n" + "=" * 50)
     flags = []
     if use_debug: flags.append("debug")
@@ -1143,6 +1292,7 @@ if __name__ == "__main__":
         midi_output=midi_output,
         midi_input=midi_input,
         enable_midi=use_midi,
+        cc_channel=cc_channel,
     )
     try:
         gate.run()
