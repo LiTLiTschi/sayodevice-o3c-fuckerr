@@ -229,7 +229,7 @@ sayodevice --classic interactive
 
 See the `examples/` directory:
 
-- **`sequence_gate.py`** — 4x2 step sequencer with beat visualization, cursor navigation, BPM control via knob, MIDI output, ADSR envelope editor, and MIDI learn mode.
+- **`sequence_gate.py`** — 4x2 step sequencer with beat visualization, knob subdivision control, MIDI output, ADSR envelope editor (knob click), and MIDI learn mode.
 
 ```powershell
 # Run with real device buttons
@@ -244,11 +244,8 @@ python examples/sequence_gate.py --midi
 # With MIDI to a specific port
 python examples/sequence_gate.py --midi --output "loopMIDI Port"
 
-# With ADSR envelope editor (knob click to enter/exit)
-python examples/sequence_gate.py --midi --adsr
-
 # All features
-python examples/sequence_gate.py --midi --adsr --output "loopMIDI Port" --input "MIDI Controller"
+python examples/sequence_gate.py --midi --output "loopMIDI Port" --input "MIDI Controller"
 ```
 
 ### Sequence Gate Controls
@@ -259,8 +256,8 @@ python examples/sequence_gate.py --midi --adsr --output "loopMIDI Port" --input 
 | Button 1 | Cursor left |
 | Button 2 | Toggle square on/off |
 | Button 3 | Cursor right |
-| Knob left/right | BPM -/+10 |
-| Knob click | Enter ADSR editor (with --adsr) |
+| Knob left/right | Subdivision down/up (quarter/eighth/16th/32nd) |
+| Knob click | Enter ADSR editor |
 
 **ADSR editor mode (4 colored bars on screen):**
 | Input | Action |
