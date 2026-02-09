@@ -697,6 +697,14 @@ class SequenceGate:
             for row in range(Theme.GRID_ROWS):
                 self._envelope_gens[(col, row)] = EnvelopeGenerator(self.envelope)
 
+    def _clear_all_elements(self, dev):
+        """Reset all 16 screen elements to empty. Used between view switches."""
+        for i in range(16):
+            dev.set_screen_element(element_index=i, element_type=0, wait_response=False)
+        self.element_states.clear()
+        if self.adsr_editor:
+            self.adsr_editor._element_states.clear()
+
     def _set_element(self, dev, index: int, element_type: int,
                      x: int = 0, y: int = 0, width: int = 40, height: int = 40,
                      color: str = "#FFFFFF"):
@@ -779,7 +787,7 @@ class SequenceGate:
                 self._in_learn_mode = True
         elif cmd == 'toggle_adsr':
             self._in_adsr_mode = True
-            self.element_states.clear()
+            self._clear_all_elements(dev)
             print("[ADSR] Entering editor")
             return True
 
@@ -794,7 +802,7 @@ class SequenceGate:
                 self._in_learn_mode = False
             else:
                 self._in_adsr_mode = True
-                self.element_states.clear()
+                self._clear_all_elements(dev)
                 print("[ADSR] Entering editor")
                 return True
 
@@ -915,15 +923,14 @@ class SequenceGate:
 
     def _redraw_sequencer(self, dev):
         """Redraw the full sequencer screen after leaving editor mode."""
-        self.element_states.clear()
+        self._clear_all_elements(dev)
 
-        # Background (layer 1) + clear layer 0
+        # Background (layer 1)
         dev.set_screen_element(
             x=0, y=0, width=Theme.SCREEN_WIDTH, height=Theme.SCREEN_HEIGHT,
             color=Colors.BG, element_type=1, element_index=1,
             wait_response=False,
         )
-        dev.set_screen_element(element_index=0, element_type=0, wait_response=False)
 
         # Grid lines (layers 12-15)
         self._draw_grid_lines(dev)
@@ -968,9 +975,7 @@ class SequenceGate:
 
         with self.device as dev:
             # Clear all 16 elements for clean state (no stale artifacts)
-            for i in range(16):
-                dev.set_screen_element(element_index=i, element_type=0, wait_response=False)
-            self.element_states.clear()
+            self._clear_all_elements(dev)
 
             # Initial screen setup
             dev.set_screen_element(
@@ -978,7 +983,6 @@ class SequenceGate:
                 color=Colors.BG, element_type=1, element_index=1,
                 wait_response=False,
             )
-            dev.set_screen_element(element_index=0, element_type=0, wait_response=False)
 
             # Grid lines (layers 12-15)
             self._draw_grid_lines(dev)
