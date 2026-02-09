@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import cmd
+import runpy
 import sys
 import time
 import traceback
@@ -615,6 +616,31 @@ class SayoREPL(cmd.Cmd):
 
 
 # ============================================================
+# Script runner
+# ============================================================
+
+def run_script(script_path: str, script_args: list[str] | None = None) -> None:
+    """Run a Python script with sayodevice available, as if it were __main__."""
+    import os
+    if not os.path.isfile(script_path):
+        print(f"File not found: {script_path}")
+        sys.exit(1)
+    # Set sys.argv so the script sees its own args
+    old_argv = sys.argv
+    sys.argv = [script_path] + (script_args or [])
+    try:
+        runpy.run_path(script_path, run_name="__main__")
+    except SystemExit:
+        pass  # Script called sys.exit(), that's fine
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+    except Exception:
+        traceback.print_exc()
+    finally:
+        sys.argv = old_argv
+
+
+# ============================================================
 # CLI entry point
 # ============================================================
 
@@ -704,6 +730,11 @@ def main(argv: list[str] | None = None):
     p_raw.add_argument("cmd_id", help="Command ID (hex or decimal)")
     p_raw.add_argument("data", nargs="?", default="", help="Data as hex string")
 
+    # run
+    p_run = sub.add_parser("run", help="Run a Python script")
+    p_run.add_argument("script", help="Path to Python script")
+    p_run.add_argument("script_args", nargs="*", help="Arguments for the script")
+
     # interactive
     sub.add_parser("interactive", aliases=["i", "repl"], help="Interactive debugging console")
 
@@ -737,6 +768,11 @@ def main(argv: list[str] | None = None):
                 print(f"   {i.mode.name if i.mode else '?'}: {i.path.decode(errors='replace')[:80]}")
         else:
             print("\n❌ No config interfaces found. Is the device connected?")
+        return
+
+    # ---- run (no device needed) ----
+    if args.command == "run":
+        run_script(args.script, args.script_args)
         return
 
     # ---- analyze (no device needed) ----
