@@ -78,6 +78,14 @@ class Theme:
     BEAT_INDICATOR_COLOR = "#6BDAFFFF"
     BEAT_INDICATOR_FIRST_COLOR = "#16FFEFFF"
 
+    # Per-subdivision beat colors (normal / first-beat-of-bar)
+    BEAT_COLORS = {
+        "QUARTER":      ("#FFFFFFCC", "#FFFFFFEE"),       # white
+        "EIGHTH":       ("#66FF66FF", "#AAFFAAFF"),       # green
+        "SIXTEENTH":    ("#6BDAFFFF", "#16FFEFFF"),       # cyan (default)
+        "THIRTY_SECOND": ("#FF66FFFF", "#FFAAFFFF"),      # magenta
+    }
+
     NOTE_SUBDIVISION = "SIXTEENTH"
 
     QUARTER_NOTE_MARKER_COLOR = "#FFFFFF99"
@@ -143,6 +151,12 @@ class Colors:
     BEAT_FIRST = _b(Theme.BEAT_INDICATOR_FIRST_COLOR, BG)
     ADSR_CURVE = _b(Theme.ADSR_CURVE_INDICATOR, BG)
 
+    # Per-subdivision beat colors {subdivision: (normal, first)}
+    BEAT_BY_SUBDIV = {
+        k: (_b(v[0], Theme.BACKGROUND_COLOR), _b(v[1], Theme.BACKGROUND_COLOR))
+        for k, v in Theme.BEAT_COLORS.items()
+    }
+
 
 # ============================================================
 # Note Subdivision
@@ -205,30 +219,28 @@ class DeviceInput(InputHandler):
     def __init__(self, device: sayodevice.SayoDevice):
         self.device = device
         self._prev = sayodevice.ButtonState()
-        self._knob_armed = True
+        self._knob_cooldown = 0.0  # epoch time when cooldown expires
 
     def poll(self) -> dict:
         btns = self.device.get_buttons()
         prev = self._prev
         self._prev = btns
+        now = time()
 
-        # Knob encoder debounce: a full detent produces multiple
-        # 0→1→0 bounce transitions. The _knob_armed flag ensures we
-        # fire exactly one event per physical detent. After firing,
-        # we disarm and only re-arm when both directions are released.
-        knob_idle = not btns.knob_left and not btns.knob_right
+        # Knob encoder debounce: cooldown timer fires one event per
+        # physical detent. After firing, ignore edges for 80ms.
+        # Unlike the armed/idle FSM, this doesn't require seeing idle
+        # state between polls — just wall-clock time.
         knob_right_edge = False
         knob_left_edge = False
 
-        if self._knob_armed:
+        if now >= self._knob_cooldown:
             if btns.knob_right and not prev.knob_right and not btns.knob_left:
                 knob_right_edge = True
-                self._knob_armed = False
+                self._knob_cooldown = now + 0.080
             elif btns.knob_left and not prev.knob_left and not btns.knob_right:
                 knob_left_edge = True
-                self._knob_armed = False
-        elif knob_idle:
-            self._knob_armed = True
+                self._knob_cooldown = now + 0.080
 
         result = {
             'button1': btns.button1,
@@ -779,17 +791,35 @@ class SequenceGate:
         """Color for a square that currently has the beat on it."""
         if activated:
             return Colors.ACTIVATED_BEAT
-        return Colors.BEAT_FIRST if is_first else Colors.BEAT
+        normal, first = Colors.BEAT_BY_SUBDIV[self.note_subdivision]
+        return first if is_first else normal
 
     def _draw_grid_lines(self, dev):
-        """Draw grid lines (layers 12-15). Uses self.note_subdivision."""
-        is_16th = self.note_subdivision == "SIXTEENTH"
-        self._set_element(dev, 12, 1, 36, 0, Theme.GRID_WIDTH, 80, Colors.GRID)
-        self._set_element(dev, 13, 1, 76, 0, Theme.GRID_WIDTH, 80,
-                          Colors.QUARTER if not is_16th else Colors.GRID)
-        self._set_element(dev, 14, 1, 116, 0, Theme.GRID_WIDTH, 80, Colors.GRID)
-        self._set_element(dev, 15, 1, 0, 36, 160, Theme.GRID_WIDTH,
-                          Colors.QUARTER if is_16th else Colors.GRID)
+        """Draw grid lines (layers 12-15) with subdivision-aware quarter markers.
+
+        Quarter-note boundaries vary by subdivision:
+            QUARTER:      every column = 1 quarter → all 3 vertical lines
+            EIGHTH:       every 2 beats = quarter → x=76 vertical + y=36 horizontal
+            SIXTEENTH:    every 4 beats = quarter → y=36 horizontal only
+            THIRTY_SECOND: 8 beats = 1 quarter → no quarter boundaries visible
+        """
+        sub = self.note_subdivision
+        q = Colors.BEAT_BY_SUBDIV[sub][0]  # quarter marker = subdivision beat color
+        g = Colors.GRID
+
+        if sub == "QUARTER":
+            v1, v2, v3, h = q, q, q, g
+        elif sub == "EIGHTH":
+            v1, v2, v3, h = g, q, g, q
+        elif sub == "SIXTEENTH":
+            v1, v2, v3, h = g, g, g, q
+        else:  # THIRTY_SECOND
+            v1, v2, v3, h = g, g, g, g
+
+        self._set_element(dev, 12, 1, 36, 0, Theme.GRID_WIDTH, 80, v1)
+        self._set_element(dev, 13, 1, 76, 0, Theme.GRID_WIDTH, 80, v2)
+        self._set_element(dev, 14, 1, 116, 0, Theme.GRID_WIDTH, 80, v3)
+        self._set_element(dev, 15, 1, 0, 36, 160, Theme.GRID_WIDTH, h)
 
     def _set_subdivision(self, direction: int, dev):
         """Cycle note subdivision (knob left=-1, knob right=+1)."""
@@ -1073,7 +1103,7 @@ class SequenceGate:
                         self.render_beat_change(dev, prev_beat)
                         prev_beat = self.current_beat
 
-                sleep(0.01)
+                sleep(0.002)
 
         # Cleanup
         if self._midi_enabled:
