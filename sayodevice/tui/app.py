@@ -80,11 +80,20 @@ def main() -> None:
 
 
 def run() -> None:
-    """Top-level entry point — dispatches to TUI or classic CLI."""
+    """Top-level entry point — dispatches to TUI, classic CLI, or script runner."""
     if "--classic" in sys.argv:
         sys.argv.remove("--classic")
         from sayodevice.cli import main as cli_main
         cli_main()
+    elif len(sys.argv) > 1 and sys.argv[1] == "run":
+        # Shortcut: `sayodevice run script.py` works without --classic
+        sys.argv.pop(0)  # remove 'sayodevice'
+        sys.argv.pop(0)  # remove 'run'
+        if not sys.argv:
+            print("Usage: sayodevice run <script.py> [args...]")
+            sys.exit(1)
+        from sayodevice.cli import run_script
+        run_script(sys.argv[0], sys.argv[1:])
     else:
         main()
 

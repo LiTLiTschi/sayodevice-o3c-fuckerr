@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import cmd
+import runpy
 import sys
 import time
 import traceback
@@ -615,6 +616,31 @@ class SayoREPL(cmd.Cmd):
 
 
 # ============================================================
+# Script runner
+# ============================================================
+
+def run_script(script_path: str, script_args: list[str] | None = None) -> None:
+    """Run a Python script with sayodevice available, as if it were __main__."""
+    import os
+    if not os.path.isfile(script_path):
+        print(f"File not found: {script_path}")
+        sys.exit(1)
+    # Set sys.argv so the script sees its own args
+    old_argv = sys.argv
+    sys.argv = [script_path] + (script_args or [])
+    try:
+        runpy.run_path(script_path, run_name="__main__")
+    except SystemExit:
+        pass  # Script called sys.exit(), that's fine
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+    except Exception:
+        traceback.print_exc()
+    finally:
+        sys.argv = old_argv
+
+
+# ============================================================
 # CLI entry point
 # ============================================================
 
@@ -704,8 +730,28 @@ def main(argv: list[str] | None = None):
     p_raw.add_argument("cmd_id", help="Command ID (hex or decimal)")
     p_raw.add_argument("data", nargs="?", default="", help="Data as hex string")
 
+    # run
+    p_run = sub.add_parser("run", help="Run a Python script")
+    p_run.add_argument("script", help="Path to Python script")
+    p_run.add_argument("script_args", nargs="*", help="Arguments for the script")
+
     # interactive
     sub.add_parser("interactive", aliases=["i", "repl"], help="Interactive debugging console")
+
+    # midi
+    p_midi = sub.add_parser("midi", help="MIDI tools (requires mido + python-rtmidi)")
+    midi_sub = p_midi.add_subparsers(dest="midi_action")
+    midi_sub.add_parser("ports", help="List available MIDI input/output ports")
+    p_midi_bridge = midi_sub.add_parser("bridge", help="Bridge device buttons to MIDI")
+    p_midi_bridge.add_argument("--output", default="", help="MIDI output port name")
+    p_midi_bridge.add_argument("--input", default="", help="MIDI input port name")
+    p_midi_bridge.add_argument("--through", action="store_true", help="Enable MIDI through")
+    p_midi_bridge.add_argument("--note", action="append", default=[],
+                                help="Map button to note, e.g. button1:60 or button2:C4")
+    p_midi_bridge.add_argument("--cc", action="append", default=[],
+                                help="Map button to CC, e.g. button3:1:127")
+    p_midi_bridge.add_argument("--knob-cc", type=int, default=1,
+                                help="CC number for knob rotation (default: 1)")
 
     # setup
     p_setup = sub.add_parser("setup", help="Manage named device setups")
@@ -738,6 +784,41 @@ def main(argv: list[str] | None = None):
         else:
             print("\n❌ No config interfaces found. Is the device connected?")
         return
+
+    # ---- run (no device needed) ----
+    if args.command == "run":
+        run_script(args.script, args.script_args)
+        return
+
+    # ---- midi ports (no device needed for 'ports') ----
+    if args.command == "midi":
+        action = args.midi_action
+        if not action:
+            p_midi.print_help()
+            return
+        if action == "ports":
+            try:
+                from .midi import list_midi_ports
+                ports = list_midi_ports()
+                print("MIDI Output ports:")
+                for p in ports['outputs']:
+                    print(f"  {p}")
+                if not ports['outputs']:
+                    print("  (none)")
+                print("\nMIDI Input ports:")
+                for p in ports['inputs']:
+                    print(f"  {p}")
+                if not ports['inputs']:
+                    print("  (none)")
+            except ImportError:
+                print("MIDI support not installed. Install with: pip install sayodevice[midi]")
+            return
+        if action == "bridge":
+            # Needs a device — fall through
+            pass
+        else:
+            p_midi.print_help()
+            return
 
     # ---- analyze (no device needed) ----
     if args.command == "analyze":
@@ -916,6 +997,69 @@ def main(argv: list[str] | None = None):
                 print(f"✅ Applied '{args.name}' ({elems} elements, {keys} keys)")
             except FileNotFoundError:
                 print(f"❌ Setup '{args.name}' not found")
+
+        elif args.command == "midi" and args.midi_action == "bridge":
+            try:
+                from .midi import MidiBridge
+                from .listener import DeviceListener
+                listener = DeviceListener(dev, poll_interval_ms=20)
+                bridge = MidiBridge(
+                    listener=listener,
+                    output_port=args.output,
+                    input_port=args.input if args.input else None,
+                )
+
+                # Parse note mappings: button1:60 or button2:C4
+                _note_names = {
+                    'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11,
+                }
+                for mapping in args.note:
+                    parts = mapping.split(':')
+                    if len(parts) >= 2:
+                        btn = parts[0]
+                        note_str = parts[1]
+                        try:
+                            note_val = int(note_str)
+                        except ValueError:
+                            # Parse note name like C4, D#5
+                            name = note_str[0].upper()
+                            sharp = '#' in note_str or 's' in note_str.lower()
+                            octave = int(note_str[-1])
+                            note_val = _note_names.get(name, 0) + (1 if sharp else 0) + (octave + 1) * 12
+                        vel = int(parts[2]) if len(parts) > 2 else 127
+                        bridge.map_button(btn, note=note_val, velocity=vel)
+                        print(f"  Map {btn} -> note {note_val} (vel={vel})")
+
+                # Parse CC mappings: button3:1:127
+                for mapping in args.cc:
+                    parts = mapping.split(':')
+                    if len(parts) >= 2:
+                        btn = parts[0]
+                        cc = int(parts[1])
+                        val = int(parts[2]) if len(parts) > 2 else 127
+                        bridge.map_button_cc(btn, cc=cc, value=val)
+                        print(f"  Map {btn} -> CC {cc} (val={val})")
+
+                # Knob mapping
+                bridge.map_knob(cc=args.knob_cc)
+                print(f"  Knob -> CC {args.knob_cc}")
+
+                bridge.through_enabled = args.through
+                if args.through:
+                    print("  MIDI through enabled")
+
+                bridge.start()
+                print("\n  MIDI bridge running. Press Ctrl+C to stop.\n")
+                try:
+                    while True:
+                        time.sleep(0.1)
+                except KeyboardInterrupt:
+                    print("\n  Stopping...")
+                finally:
+                    bridge.stop()
+                    listener.stop()
+            except ImportError:
+                print("MIDI support not installed. Install with: pip install sayodevice[midi]")
 
         elif args.command in ("interactive", "i", "repl"):
             repl = SayoREPL(dev)
