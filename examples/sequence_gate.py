@@ -6,15 +6,14 @@ Usage:
     python sequence_gate.py --debug                # keyboard debug input
     python sequence_gate.py --midi                 # with MIDI output (default port)
     python sequence_gate.py --midi --output "port" # specific MIDI output port
-    python sequence_gate.py --midi --adsr          # with ADSR envelope editor
 
 Controls (device — sequencer mode):
     Button 1:    cursor left
     Button 2:    toggle square (hold 500ms for ready indicator)
     Button 3:    cursor right
-    Knob left:   BPM -10
-    Knob right:  BPM +10
-    Knob click:  enter ADSR editor (if --adsr) / reset screen
+    Knob left:   subdivision down (quarter → eighth → sixteenth → 32nd)
+    Knob right:  subdivision up
+    Knob click:  enter ADSR editor
 
 Controls (device — ADSR editor mode):
     Button 1:    select previous parameter (A/D/S/R/curves)
@@ -146,6 +145,25 @@ class Colors:
 
 
 # ============================================================
+# Note Subdivision
+# ============================================================
+
+SUBDIVISIONS = ["QUARTER", "EIGHTH", "SIXTEENTH", "THIRTY_SECOND"]
+SUBDIVISION_MS = {
+    "QUARTER": 60000,
+    "EIGHTH": 30000,
+    "SIXTEENTH": 15000,
+    "THIRTY_SECOND": 7500,
+}
+SUBDIVISION_BEATS_PER_BAR = {
+    "QUARTER": 4,
+    "EIGHTH": 8,
+    "SIXTEENTH": 16,
+    "THIRTY_SECOND": 32,
+}
+
+
+# ============================================================
 # Default MIDI note map for 4x2 grid
 # ============================================================
 
@@ -187,17 +205,30 @@ class DeviceInput(InputHandler):
     def __init__(self, device: sayodevice.SayoDevice):
         self.device = device
         self._prev = sayodevice.ButtonState()
+        self._knob_armed = True
 
     def poll(self) -> dict:
         btns = self.device.get_buttons()
         prev = self._prev
         self._prev = btns
 
-        # Knob encoder debounce: a full detent right sends
-        # rrp -> lrp -> rrr -> lrr (and mirrored for left).
-        # Only register a direction if the opposite is NOT pressed.
-        knob_right_edge = btns.knob_right and not prev.knob_right and not btns.knob_left
-        knob_left_edge = btns.knob_left and not prev.knob_left and not btns.knob_right
+        # Knob encoder debounce: a full detent produces multiple
+        # 0→1→0 bounce transitions. The _knob_armed flag ensures we
+        # fire exactly one event per physical detent. After firing,
+        # we disarm and only re-arm when both directions are released.
+        knob_idle = not btns.knob_left and not btns.knob_right
+        knob_right_edge = False
+        knob_left_edge = False
+
+        if self._knob_armed:
+            if btns.knob_right and not prev.knob_right and not btns.knob_left:
+                knob_right_edge = True
+                self._knob_armed = False
+            elif btns.knob_left and not prev.knob_left and not btns.knob_right:
+                knob_left_edge = True
+                self._knob_armed = False
+        elif knob_idle:
+            self._knob_armed = True
 
         result = {
             'button1': btns.button1,
@@ -608,9 +639,11 @@ class SequencerMidi:
 class SequenceGate:
     def __init__(self, bpm: int, use_debug_input: bool = False,
                  midi_output: str = "", midi_input: str = "",
-                 enable_midi: bool = False, enable_adsr: bool = False):
+                 enable_midi: bool = False):
         self.bpm = bpm
-        self.ms_between_beats = 30000 / bpm
+        self.note_subdivision = Theme.NOTE_SUBDIVISION
+        self.beats_per_bar = SUBDIVISION_BEATS_PER_BAR[self.note_subdivision]
+        self.ms_between_beats = SUBDIVISION_MS[self.note_subdivision] / bpm
         self.device = sayodevice.SayoDevice.open()
 
         self.cursor_x = 0
@@ -627,7 +660,6 @@ class SequenceGate:
         self.beat_time = time()
         self.current_beat = 0
         self.total_beats = 0
-        self.beats_per_bar = 16 if Theme.NOTE_SUBDIVISION == "SIXTEENTH" else 8
 
         # Dirty-tracking for screen elements
         self.element_states: dict[int, dict] = {}
@@ -642,8 +674,7 @@ class SequenceGate:
         self.midi = SequencerMidi(output_port=midi_output, input_port=midi_input)
         self._midi_enabled = enable_midi
 
-        # ADSR
-        self._adsr_enabled = enable_adsr
+        # ADSR (always available)
         self.adsr_editor: ADSREditor | None = None
         self._in_adsr_mode = False
         self._in_learn_mode = False
@@ -683,7 +714,7 @@ class SequenceGate:
 
     def _set_bpm(self, bpm: int):
         self.bpm = max(Theme.MIN_BPM, min(Theme.MAX_BPM, bpm))
-        self.ms_between_beats = 30000 / self.bpm
+        self.ms_between_beats = SUBDIVISION_MS[self.note_subdivision] / self.bpm
         print(f"BPM: {self.bpm}")
 
     def _beat_color(self, activated: bool, is_first: bool) -> str:
@@ -691,6 +722,28 @@ class SequenceGate:
         if activated:
             return Colors.ACTIVATED_BEAT
         return Colors.BEAT_FIRST if is_first else Colors.BEAT
+
+    def _draw_grid_lines(self, dev):
+        """Draw grid lines (layers 12-15). Uses self.note_subdivision."""
+        is_16th = self.note_subdivision == "SIXTEENTH"
+        self._set_element(dev, 12, 1, 36, 0, Theme.GRID_WIDTH, 80, Colors.GRID)
+        self._set_element(dev, 13, 1, 76, 0, Theme.GRID_WIDTH, 80,
+                          Colors.QUARTER if not is_16th else Colors.GRID)
+        self._set_element(dev, 14, 1, 116, 0, Theme.GRID_WIDTH, 80, Colors.GRID)
+        self._set_element(dev, 15, 1, 0, 36, 160, Theme.GRID_WIDTH,
+                          Colors.QUARTER if is_16th else Colors.GRID)
+
+    def _set_subdivision(self, direction: int, dev):
+        """Cycle note subdivision (knob left=-1, knob right=+1)."""
+        idx = SUBDIVISIONS.index(self.note_subdivision)
+        new_idx = max(0, min(len(SUBDIVISIONS) - 1, idx + direction))
+        if new_idx == idx:
+            return
+        self.note_subdivision = SUBDIVISIONS[new_idx]
+        self.beats_per_bar = SUBDIVISION_BEATS_PER_BAR[self.note_subdivision]
+        self.ms_between_beats = SUBDIVISION_MS[self.note_subdivision] / self.bpm
+        print(f"Subdivision: {self.note_subdivision} ({self.beats_per_bar} beats/bar)")
+        self._draw_grid_lines(dev)
 
     def _midi_learn_note(self, note: int, channel: int) -> None:
         """Callback for MIDI learn — assign note to current cursor position."""
@@ -724,33 +777,26 @@ class SequenceGate:
             else:
                 self.midi.start_learn(self._midi_learn_note)
                 self._in_learn_mode = True
-        elif cmd == 'toggle_adsr' and self._adsr_enabled:
+        elif cmd == 'toggle_adsr':
             self._in_adsr_mode = True
             self.element_states.clear()
             print("[ADSR] Entering editor")
             return True
 
-        # Knob: BPM control + mode switches
+        # Knob: subdivision control + mode switches
         if inp.get('knob_right'):
-            self._set_bpm(self.bpm + 10)
+            self._set_subdivision(1, dev)
         if inp.get('knob_left'):
-            self._set_bpm(self.bpm - 10)
+            self._set_subdivision(-1, dev)
         if inp.get('knob_click'):
             if self._in_learn_mode:
                 self.midi.stop_learn()
                 self._in_learn_mode = False
-            elif self._adsr_enabled:
+            else:
                 self._in_adsr_mode = True
                 self.element_states.clear()
                 print("[ADSR] Entering editor")
                 return True
-            else:
-                # Reset screen
-                print("[knob_click] Reset")
-                for i in range(16):
-                    dev.set_screen_element(element_index=i, element_type=0, wait_response=False)
-                self.element_states.clear()
-                self.activated_squares.clear()
 
         now = time()
         b1 = inp.get('button1', False)
@@ -880,13 +926,7 @@ class SequenceGate:
         dev.set_screen_element(element_index=0, element_type=0, wait_response=False)
 
         # Grid lines (layers 12-15)
-        is_16th = Theme.NOTE_SUBDIVISION == "SIXTEENTH"
-        self._set_element(dev, 12, 1, 36, 0, Theme.GRID_WIDTH, 80, Colors.GRID)
-        self._set_element(dev, 13, 1, 76, 0, Theme.GRID_WIDTH, 80,
-                          Colors.QUARTER if not is_16th else Colors.GRID)
-        self._set_element(dev, 14, 1, 116, 0, Theme.GRID_WIDTH, 80, Colors.GRID)
-        self._set_element(dev, 15, 1, 0, 36, 160, Theme.GRID_WIDTH,
-                          Colors.QUARTER if is_16th else Colors.GRID)
+        self._draw_grid_lines(dev)
 
         # Redraw activated squares
         for pos in self.activated_squares:
@@ -905,7 +945,7 @@ class SequenceGate:
     def run(self):
         mode_str = "device" if not isinstance(self.input, DebugKeyboardInput) else "debug"
         print("Sequence Gate")
-        print(f"  Mode: {Theme.NOTE_SUBDIVISION} ({self.beats_per_bar} beats/bar)")
+        print(f"  Mode: {self.note_subdivision} ({self.beats_per_bar} beats/bar)")
         print(f"  Input: {mode_str}")
 
         # Initialize MIDI if enabled
@@ -916,18 +956,22 @@ class SequenceGate:
                 print("  MIDI disabled (failed to open)")
                 self._midi_enabled = False
 
-        # Initialize ADSR
-        if self._adsr_enabled:
-            self._init_adsr()
-            print(f"  ADSR: A={self.envelope.attack_ms}ms D={self.envelope.decay_ms}ms "
-                  f"S={self.envelope.sustain:.2f} R={self.envelope.release_ms}ms")
+        # Initialize ADSR (always available via knob click)
+        self._init_adsr()
+        print(f"  ADSR: A={self.envelope.attack_ms}ms D={self.envelope.decay_ms}ms "
+              f"S={self.envelope.sustain:.2f} R={self.envelope.release_ms}ms")
 
         if isinstance(self.input, DebugKeyboardInput):
             print("  Keys: 1/2/3 buttons, k1/k2/k3 knob, +/- BPM, m learn, e ADSR, q quit")
         else:
-            print("  Device: btn1=left, btn2=toggle, btn3=right, knob=BPM, click=ADSR/reset")
+            print("  Device: btn1=left, btn2=toggle, btn3=right, knob=subdiv, click=ADSR")
 
         with self.device as dev:
+            # Clear all 16 elements for clean state (no stale artifacts)
+            for i in range(16):
+                dev.set_screen_element(element_index=i, element_type=0, wait_response=False)
+            self.element_states.clear()
+
             # Initial screen setup
             dev.set_screen_element(
                 x=0, y=0, width=Theme.SCREEN_WIDTH, height=Theme.SCREEN_HEIGHT,
@@ -937,13 +981,7 @@ class SequenceGate:
             dev.set_screen_element(element_index=0, element_type=0, wait_response=False)
 
             # Grid lines (layers 12-15)
-            is_16th = Theme.NOTE_SUBDIVISION == "SIXTEENTH"
-            self._set_element(dev, 12, 1, 36, 0, Theme.GRID_WIDTH, 80, Colors.GRID)
-            self._set_element(dev, 13, 1, 76, 0, Theme.GRID_WIDTH, 80,
-                              Colors.QUARTER if not is_16th else Colors.GRID)
-            self._set_element(dev, 14, 1, 116, 0, Theme.GRID_WIDTH, 80, Colors.GRID)
-            self._set_element(dev, 15, 1, 0, 36, 160, Theme.GRID_WIDTH,
-                              Colors.QUARTER if is_16th else Colors.GRID)
+            self._draw_grid_lines(dev)
 
             # Initial cursor (layer 11)
             cx = (self.current_beat % Theme.GRID_COLS) * 40 + 12
@@ -989,7 +1027,6 @@ class SequenceGate:
 if __name__ == "__main__":
     use_debug = "--debug" in sys.argv
     use_midi = "--midi" in sys.argv
-    use_adsr = "--adsr" in sys.argv
 
     # Parse --output flag
     midi_output = ""
@@ -1005,15 +1042,10 @@ if __name__ == "__main__":
         if idx + 1 < len(sys.argv):
             midi_input = sys.argv[idx + 1]
 
-    # --adsr implies --midi
-    if use_adsr and not use_midi:
-        use_midi = True
-
     print("\n" + "=" * 50)
     flags = []
     if use_debug: flags.append("debug")
     if use_midi: flags.append("MIDI")
-    if use_adsr: flags.append("ADSR")
     mode = f" ({', '.join(flags)})" if flags else " (device mode)"
     print(f"Sequence Gate{mode}")
     print("=" * 50 + "\n")
@@ -1024,7 +1056,6 @@ if __name__ == "__main__":
         midi_output=midi_output,
         midi_input=midi_input,
         enable_midi=use_midi,
-        enable_adsr=use_adsr,
     )
     try:
         gate.run()
