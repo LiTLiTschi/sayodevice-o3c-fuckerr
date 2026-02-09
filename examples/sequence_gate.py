@@ -130,14 +130,19 @@ class DeviceInput(InputHandler):
         prev = self._prev
         self._prev = btns
 
+        # Knob encoder debounce: a full detent right sends
+        # rrp -> lrp -> rrr -> lrr (and mirrored for left).
+        # Only register a direction if the opposite is NOT pressed.
+        knob_right_edge = btns.knob_right and not prev.knob_right and not btns.knob_left
+        knob_left_edge = btns.knob_left and not prev.knob_left and not btns.knob_right
+
         result = {
             'button1': btns.button1,
             'button2': btns.button2,
             'button3': btns.button3,
-            # Knob rotations are transient — fire once per edge
-            'knob_left': btns.knob_left and not prev.knob_left,
+            'knob_left': knob_left_edge,
             'knob_click': btns.knob_click and not prev.knob_click,
-            'knob_right': btns.knob_right and not prev.knob_right,
+            'knob_right': knob_right_edge,
             'command': None,
         }
         return result

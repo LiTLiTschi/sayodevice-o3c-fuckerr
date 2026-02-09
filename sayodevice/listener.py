@@ -263,11 +263,11 @@ class DeviceListener:
         try:
             buttons = self._device.get_buttons()
             if self._last_buttons is not None:
+                prev = self._last_buttons
                 # Compare each button field for changes
-                _BUTTON_FIELDS = ('button1', 'button2', 'button3',
-                                  'knob_click', 'knob_left', 'knob_right')
+                _BUTTON_FIELDS = ('button1', 'button2', 'button3', 'knob_click')
                 for field in _BUTTON_FIELDS:
-                    old_val = getattr(self._last_buttons, field)
+                    old_val = getattr(prev, field)
                     new_val = getattr(buttons, field)
                     if new_val != old_val:
                         evt = ButtonEvent(
@@ -277,6 +277,37 @@ class DeviceListener:
                         events.append(evt)
                         for cb in self._button_callbacks:
                             cb(evt)
+
+                # Knob encoder debounce: only fire knob_left/knob_right
+                # if the opposite direction is NOT currently pressed.
+                # Full detent right sends: rrp -> lrp -> rrr -> lrr
+                # The lrp is noise — knob_right is still pressed at that point.
+                if buttons.knob_right and not prev.knob_right and not buttons.knob_left:
+                    evt = ButtonEvent(timestamp=now, button='knob_right',
+                                     pressed=True, state=buttons)
+                    events.append(evt)
+                    for cb in self._button_callbacks:
+                        cb(evt)
+                elif not buttons.knob_right and prev.knob_right:
+                    evt = ButtonEvent(timestamp=now, button='knob_right',
+                                     pressed=False, state=buttons)
+                    events.append(evt)
+                    for cb in self._button_callbacks:
+                        cb(evt)
+
+                if buttons.knob_left and not prev.knob_left and not buttons.knob_right:
+                    evt = ButtonEvent(timestamp=now, button='knob_left',
+                                     pressed=True, state=buttons)
+                    events.append(evt)
+                    for cb in self._button_callbacks:
+                        cb(evt)
+                elif not buttons.knob_left and prev.knob_left:
+                    evt = ButtonEvent(timestamp=now, button='knob_left',
+                                     pressed=False, state=buttons)
+                    events.append(evt)
+                    for cb in self._button_callbacks:
+                        cb(evt)
+
             self._last_buttons = buttons
         except Exception:
             pass  # Device may be busy
