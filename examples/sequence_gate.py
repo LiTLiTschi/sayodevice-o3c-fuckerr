@@ -153,7 +153,8 @@ class Colors:
 
     # Per-subdivision beat colors {subdivision: (normal, first)}
     BEAT_BY_SUBDIV = {
-        k: (_b(v[0], Theme.BACKGROUND_COLOR), _b(v[1], Theme.BACKGROUND_COLOR))
+        k: (Theme.blend_colors(v[0], Theme.BACKGROUND_COLOR),
+            Theme.blend_colors(v[1], Theme.BACKGROUND_COLOR))
         for k, v in Theme.BEAT_COLORS.items()
     }
 
