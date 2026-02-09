@@ -215,47 +215,67 @@ class InputHandler(ABC):
 
 
 class DeviceInput(InputHandler):
-    """Real SAYO device input via get_buttons()."""
+    """Real SAYO device input via threaded USB poller.
+
+    A dedicated thread polls get_buttons() as fast as USB allows (~140Hz).
+    Knob edges are accumulated into an integer counter so that fast turning
+    never loses detents — even when the main loop is busy rendering.
+    """
+
+    KNOB_COOLDOWN_SEC = 0.025  # 25ms debounce per detent (bounce settles in 5-20ms)
 
     def __init__(self, device: sayodevice.SayoDevice):
         self.device = device
-        self._prev = sayodevice.ButtonState()
-        self._knob_cooldown = 0.0  # epoch time when cooldown expires
+        self._buttons = sayodevice.ButtonState()  # latest snapshot from thread
+        self._knob_accum = 0  # +N = right, -N = left
+        self._lock = threading.Lock()
+        self._prev_main = sayodevice.ButtonState()  # for button edge detection in poll()
+        self._running = True
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._thread.start()
+
+    def _poll_loop(self):
+        """Fast USB polling thread — detects knob edges and accumulates them."""
+        prev = sayodevice.ButtonState()
+        cooldown = 0.0
+        while self._running:
+            btns = self.device.get_buttons()
+            now = time()
+            if now >= cooldown:
+                if btns.knob_right and not prev.knob_right:
+                    with self._lock:
+                        self._knob_accum += 1
+                    cooldown = now + self.KNOB_COOLDOWN_SEC
+                elif btns.knob_left and not prev.knob_left:
+                    with self._lock:
+                        self._knob_accum -= 1
+                    cooldown = now + self.KNOB_COOLDOWN_SEC
+            with self._lock:
+                self._buttons = btns
+            prev = btns
 
     def poll(self) -> dict:
-        btns = self.device.get_buttons()
-        prev = self._prev
-        self._prev = btns
-        now = time()
-
-        # Knob encoder debounce: cooldown timer fires one event per
-        # physical detent. After firing, ignore edges for 80ms.
-        # Unlike the armed/idle FSM, this doesn't require seeing idle
-        # state between polls — just wall-clock time.
-        knob_right_edge = False
-        knob_left_edge = False
-
-        if now >= self._knob_cooldown:
-            if btns.knob_right and not prev.knob_right and not btns.knob_left:
-                knob_right_edge = True
-                self._knob_cooldown = now + 0.080
-            elif btns.knob_left and not prev.knob_left and not btns.knob_right:
-                knob_left_edge = True
-                self._knob_cooldown = now + 0.080
-
-        result = {
+        with self._lock:
+            btns = self._buttons
+            accum = self._knob_accum
+            self._knob_accum = 0
+        prev = self._prev_main
+        self._prev_main = btns
+        return {
             'button1': btns.button1,
             'button2': btns.button2,
             'button3': btns.button3,
-            'knob_left': knob_left_edge,
+            'knob_left': accum < 0,
+            'knob_left_count': abs(accum) if accum < 0 else 0,
             'knob_click': btns.knob_click and not prev.knob_click,
-            'knob_right': knob_right_edge,
+            'knob_right': accum > 0,
+            'knob_right_count': accum if accum > 0 else 0,
             'command': None,
         }
-        return result
 
     def stop(self):
-        pass
+        self._running = False
+        self._thread.join(timeout=1.0)
 
 
 class DebugKeyboardInput(InputHandler):
@@ -301,13 +321,17 @@ class DebugKeyboardInput(InputHandler):
                 self.held[btn] = False
                 self.auto_release[btn] = None
 
+        kl = 'k1' in raw
+        kr = 'k3' in raw
         result = {
             'button1': self.held['button1'],
             'button2': self.held['button2'],
             'button3': self.held['button3'],
-            'knob_left': 'k1' in raw,
+            'knob_left': kl,
+            'knob_left_count': 1 if kl else 0,
             'knob_click': 'k2' in raw,
-            'knob_right': 'k3' in raw,
+            'knob_right': kr,
+            'knob_right_count': 1 if kr else 0,
             'command': None,
         }
 
@@ -553,10 +577,10 @@ class ADSREditor:
             print(f"  ADSR: editing {self.PROP_LABELS[self.current_prop]}")
         self._prev_b2 = b2
 
-        # Knob: adjust selected property
-        if inp.get('knob_right'):
+        # Knob: adjust selected property (supports multiple steps per poll)
+        for _ in range(inp.get('knob_right_count', 0)):
             self._adjust_value(1)
-        if inp.get('knob_left'):
+        for _ in range(inp.get('knob_left_count', 0)):
             self._adjust_value(-1)
 
         return None
@@ -873,10 +897,10 @@ class SequenceGate:
             print("[ADSR] Entering editor — attack")
             return True
 
-        # Knob: subdivision control + mode switches
-        if inp.get('knob_right'):
+        # Knob: subdivision control + mode switches (supports multi-step)
+        for _ in range(inp.get('knob_right_count', 0)):
             self._set_subdivision(1, dev)
-        if inp.get('knob_left'):
+        for _ in range(inp.get('knob_left_count', 0)):
             self._set_subdivision(-1, dev)
         if inp.get('knob_click'):
             if self._in_learn_mode:
