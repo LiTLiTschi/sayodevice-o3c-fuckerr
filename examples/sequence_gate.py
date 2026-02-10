@@ -6,28 +6,36 @@ Usage:
     python sequence_gate.py --debug                # keyboard debug input
     python sequence_gate.py --midi                 # with MIDI output (default port)
     python sequence_gate.py --midi --output "port" # specific MIDI output port
+    python sequence_gate.py --midi --verbose-cc    # show CC messages in terminal
+    python sequence_gate.py --setup                # interactive config menu
 
-Controls (device — sequencer mode):
+Controls (device — sequencer screen):
     Button 1:    cursor left
     Button 2:    toggle square (hold 500ms for ready indicator)
     Button 3:    cursor right
     Knob left:   subdivision down (quarter → eighth → sixteenth → 32nd)
     Knob right:  subdivision up
-    Knob click:  enter ADSR editor
+    Knob click:  cycle to next screen
 
-Controls (device — ADSR editor mode):
+Controls (device — StemFX screen):
+    Button 1:    toggle Drums stem
+    Button 2:    toggle Inst stem
+    Button 3:    toggle Voc stem
+    Knob click:  cycle to next screen
+
+Controls (device — ADSR editor screen):
     Button 1:    select previous parameter (A/D/S/R/curves)
-    Button 2:    exit ADSR editor (return to sequencer)
+    Button 2:    toggle property (time/value ↔ curve type)
     Button 3:    select next parameter
     Knob left:   decrease selected value
     Knob right:  increase selected value
+    Knob click:  cycle to next screen
 
-Controls (device — MIDI learn mode):
-    Knob click (while in sequencer): toggle MIDI learn mode
+Controls (device — MIDI learn mode, sequencer only):
+    Knob click (while in learn): exit learn mode
     In learn mode:
         Button 1/3: move cursor to grid position
         Play MIDI note: assign note to cursor position
-        Knob click: exit learn mode
 
 Controls (debug):
     1/2/3:       momentary button press
@@ -57,14 +65,82 @@ MIDI CC output for Bome MIDI Translator Pro (channel 15 by default):
     CC 119  Release curve                    0/63/127
 
     Use --cc-channel N to change from default channel 15.
+
+StemFX MIDI output (configurable via --setup):
+    CC 20  Drums toggle                      0=off, 127=on
+    CC 21  Inst toggle                       0=off, 127=on
+    CC 22  Voc toggle                        0=off, 127=on
+
+Config:
+    ~/.sayodevice/sequence_gate.json  — persistent settings (screens, MIDI, stems)
+    Use --setup to edit interactively.
 """
 
+import json
 import sys
 import threading
 from abc import ABC, abstractmethod
+from pathlib import Path
 from time import sleep, time
 
 import sayodevice
+
+
+# ============================================================
+# CONFIG SYSTEM
+# ============================================================
+
+CONFIG_DIR = Path.home() / ".sayodevice"
+CONFIG_FILE = CONFIG_DIR / "sequence_gate.json"
+
+DEFAULT_CONFIG = {
+    "screens": ["sequencer", "stemfx", "adsr"],
+    "midi_output": "",
+    "midi_input": "",
+    "cc_channel": 15,
+    "verbose_cc": False,
+    "stemfx": {
+        "stems": [
+            {"name": "Drums", "color": "#0066FF", "dim": "#001133", "cc": 20},
+            {"name": "Inst",  "color": "#FF3300", "dim": "#330A00", "cc": 21},
+            {"name": "Voc",   "color": "#00FF00", "dim": "#003300", "cc": 22},
+        ],
+        "channel": 15,
+    },
+    "sequencer": {
+        "bpm": 120,
+        "subdivision": "SIXTEENTH",
+    },
+}
+
+
+def load_config() -> dict:
+    """Load config from JSON file, merged with defaults for missing keys."""
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE) as f:
+                cfg = json.load(f)
+            # Shallow merge: top-level defaults filled in
+            merged = dict(DEFAULT_CONFIG)
+            merged.update(cfg)
+            # Deep merge nested dicts
+            for key in ('stemfx', 'sequencer'):
+                if key in cfg and isinstance(cfg[key], dict):
+                    d = dict(DEFAULT_CONFIG[key])
+                    d.update(cfg[key])
+                    merged[key] = d
+            return merged
+        except (json.JSONDecodeError, OSError):
+            pass
+    return dict(DEFAULT_CONFIG)
+
+
+def save_config(cfg: dict) -> None:
+    """Save config to JSON file."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(cfg, f, indent=2)
+    print(f"  Saved to {CONFIG_FILE}")
 
 
 # ============================================================
@@ -222,6 +298,18 @@ def note_name(n: int) -> str:
 # Input Abstraction
 # ============================================================
 
+class _LockedDev:
+    """Thread-safe proxy for SayoDevice — serializes HID access."""
+
+    def __init__(self, dev, lock: threading.Lock):
+        self._dev = dev
+        self._lock = lock
+
+    def set_screen_element(self, **kw):
+        with self._lock:
+            self._dev.set_screen_element(**kw)
+
+
 class InputHandler(ABC):
     @abstractmethod
     def poll(self) -> dict:
@@ -239,11 +327,13 @@ class DeviceInput(InputHandler):
 
     KNOB_COOLDOWN_SEC = 0.025  # 25ms debounce per detent (bounce settles in 5-20ms)
 
-    def __init__(self, device: sayodevice.SayoDevice):
+    def __init__(self, device: sayodevice.SayoDevice,
+                 dev_lock: threading.Lock | None = None):
         self.device = device
+        self.dev_lock = dev_lock or threading.Lock()
         self._buttons = sayodevice.ButtonState()  # latest snapshot from thread
         self._knob_accum = 0  # +N = right, -N = left
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # protects _buttons and _knob_accum
         self._prev_main = sayodevice.ButtonState()  # for button edge detection in poll()
         self._running = True
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
@@ -254,7 +344,12 @@ class DeviceInput(InputHandler):
         prev = sayodevice.ButtonState()
         cooldown = 0.0
         while self._running:
-            btns = self.device.get_buttons()
+            with self.dev_lock:
+                try:
+                    btns = self.device.get_buttons()
+                except OSError:
+                    sleep(0.005)
+                    continue
             now = time()
             if now >= cooldown:
                 if btns.knob_right and not prev.knob_right:
@@ -382,7 +477,6 @@ class ADSREditor:
         Button 3:    next stage (A→D→S→R)
         Button 2:    toggle property (time/value ↔ curve type)
         Knob:        adjust selected property
-        Knob click:  exit to sequencer
     """
 
     STAGES = ['attack', 'decay', 'sustain', 'release']
@@ -556,16 +650,13 @@ class ADSREditor:
         """Process input while in ADSR editor mode.
 
         Returns:
-            'exit' to leave editor, 'quit' to quit app, None otherwise.
+            'quit' to quit app, None otherwise.
+            (Screen cycling is handled by main loop via knob_click.)
         """
         if inp.get('command') == 'quit':
             return 'quit'
         if inp.get('command') == 'toggle_adsr':
-            return 'exit'
-
-        # Knob click: exit editor
-        if inp.get('knob_click'):
-            return 'exit'
+            return 'quit'
 
         b1 = inp.get('button1', False)
         b2 = inp.get('button2', False)
@@ -599,6 +690,97 @@ class ADSREditor:
             self._adjust_value(-1)
 
         return None
+
+
+# ============================================================
+# StemFX Screen — Rekordbox 3-stem toggle
+# ============================================================
+
+class StemFXScreen:
+    """3-stem toggle display for Rekordbox StemFX control.
+
+    Shows 3 colored bars on the device screen. Buttons toggle each stem.
+    Active stems show bright color, inactive show dim color.
+    Sends MIDI CC per toggle.
+    """
+
+    BAR_WIDTH = 50
+    GAP = 5  # (50*3 + 5*2 = 160)
+
+    def __init__(self, config: dict, cc_output):
+        stemfx_cfg = config.get('stemfx', DEFAULT_CONFIG['stemfx'])
+        stems_cfg = stemfx_cfg.get('stems', DEFAULT_CONFIG['stemfx']['stems'])
+        self.stems = []
+        for s in stems_cfg:
+            self.stems.append({
+                'name': s['name'],
+                'color': s['color'],
+                'dim': s['dim'],
+                'cc': s['cc'],
+                'active': True,
+            })
+        self.channel = stemfx_cfg.get('channel', 15)
+        self.cc_output = cc_output
+        self._prev_buttons = [False, False, False]
+        self._element_states: dict[int, dict] = {}
+
+    def enter(self):
+        """Called when switching to this screen."""
+        self._prev_buttons = [False, False, False]
+        self._element_states.clear()
+
+    def _set_element(self, dev, index: int, element_type: int,
+                     x: int, y: int, width: int, height: int, color: str):
+        state = {'type': element_type, 'x': x, 'y': y,
+                 'w': width, 'h': height, 'color': color}
+        if self._element_states.get(index) == state:
+            return
+        dev.set_screen_element(
+            x=x, y=y, width=width, height=height,
+            color=color, element_type=element_type, element_index=index,
+            wait_response=False,
+        )
+        self._element_states[index] = state
+
+    def render(self, dev) -> None:
+        """Draw 3 colored bars — bright=active, dim=inactive."""
+        # Layer 0: background
+        self._set_element(dev, 0, 1, 0, 0, 160, 80, Colors.BG)
+
+        # Layers 1-3: stem bars
+        for i, stem in enumerate(self.stems):
+            x = i * (self.BAR_WIDTH + self.GAP)
+            color = stem['color'] if stem['active'] else stem['dim']
+            self._set_element(dev, i + 1, 1, x, 0, self.BAR_WIDTH, 80, color)
+
+        # Clear remaining layers
+        for j in range(len(self.stems) + 1, 16):
+            self._set_element(dev, j, 0, 0, 0, 1, 1, Colors.BG)
+
+    def process_input(self, inp: dict) -> str | None:
+        """Button 1/2/3 toggle stems. Returns 'quit' to exit app."""
+        if inp.get('command') == 'quit':
+            return 'quit'
+
+        buttons = [inp.get('button1', False),
+                   inp.get('button2', False),
+                   inp.get('button3', False)]
+
+        for i, (btn, prev) in enumerate(zip(buttons, self._prev_buttons)):
+            if btn and not prev and i < len(self.stems):
+                stem = self.stems[i]
+                stem['active'] = not stem['active']
+                state_str = "ON" if stem['active'] else "OFF"
+                print(f"  [StemFX] {stem['name']}: {state_str}")
+                self.cc_output.send_stem(stem['cc'], stem['active'], self.channel)
+
+        self._prev_buttons = list(buttons)
+        return None
+
+    def send_initial_state(self):
+        """Send MIDI CC for all stems (call on startup)."""
+        for stem in self.stems:
+            self.cc_output.send_stem(stem['cc'], stem['active'], self.channel)
 
 
 # ============================================================
@@ -759,8 +941,17 @@ class CCOutput:
 
     _CURVE_CC = {"linear": 0, "exponential": 63, "logarithmic": 127}
 
-    def __init__(self, channel: int = 15):
+    _CC_NAMES = {
+        102: "Beat", 103: "BPM", 104: "Subdiv",
+        105: "Step0", 106: "Step1", 107: "Step2", 108: "Step3",
+        109: "Step4", 110: "Step5", 111: "Step6", 112: "Step7",
+        113: "AtkTime", 114: "DecTime", 115: "Sustain", 116: "RelTime",
+        117: "AtkCurve", 118: "DecCurve", 119: "RelCurve",
+    }
+
+    def __init__(self, channel: int = 15, verbose: bool = False):
         self.channel = channel
+        self.verbose = verbose
         self._port = None
         self._prev: dict[int, int] = {}
 
@@ -776,6 +967,9 @@ class CCOutput:
             import mido
             self._port.send(mido.Message(
                 'control_change', control=cc, value=value, channel=self.channel))
+        if self.verbose:
+            name = self._CC_NAMES.get(cc, f"CC{cc}")
+            print(f"  [CC] ch{self.channel} {name}={value}")
         self._prev[cc] = value
 
     def send_beat(self, beat: int, force: bool = False) -> None:
@@ -805,6 +999,17 @@ class CCOutput:
         self._send(self.CC_DECAY_CURVE, self._CURVE_CC.get(envelope.decay_curve.value, 0), force)
         self._send(self.CC_RELEASE_CURVE, self._CURVE_CC.get(envelope.release_curve.value, 0), force)
 
+    def send_stem(self, cc: int, on: bool, channel: int | None = None) -> None:
+        """Send stem toggle as MIDI CC."""
+        ch = channel if channel is not None else self.channel
+        value = 127 if on else 0
+        if self._port:
+            import mido
+            self._port.send(mido.Message(
+                'control_change', control=cc, value=value, channel=ch))
+        if self.verbose:
+            print(f"  [CC] ch{ch} Stem(CC{cc})={'ON' if on else 'OFF'}")
+
     def dump_all(self, beat, bpm, subdivision, activated_squares, envelope) -> None:
         """Force-send all state (call on startup)."""
         self.send_beat(beat, force=True)
@@ -819,11 +1024,30 @@ class CCOutput:
 # ============================================================
 
 class SequenceGate:
-    def __init__(self, bpm: int, use_debug_input: bool = False,
+    def __init__(self, config: dict | None = None,
+                 use_debug_input: bool = False,
                  midi_output: str = "", midi_input: str = "",
-                 enable_midi: bool = False, cc_channel: int = 15):
+                 enable_midi: bool = False, cc_channel: int = 15,
+                 verbose_cc: bool = False):
+        # Config: CLI flags override config file values
+        cfg = config or load_config()
+        if not midi_output:
+            midi_output = cfg.get('midi_output', '')
+        if not midi_input:
+            midi_input = cfg.get('midi_input', '')
+        if cc_channel == 15:  # default → use config
+            cc_channel = cfg.get('cc_channel', 15)
+        if not verbose_cc:
+            verbose_cc = cfg.get('verbose_cc', False)
+
+        seq_cfg = cfg.get('sequencer', {})
+        bpm = seq_cfg.get('bpm', Theme.DEFAULT_BPM)
+        subdivision = seq_cfg.get('subdivision', Theme.NOTE_SUBDIVISION)
+        if subdivision not in SUBDIVISIONS:
+            subdivision = Theme.NOTE_SUBDIVISION
+
         self.bpm = bpm
-        self.note_subdivision = Theme.NOTE_SUBDIVISION
+        self.note_subdivision = subdivision
         self.beats_per_bar = SUBDIVISION_BEATS_PER_BAR[self.note_subdivision]
         self.ms_between_beats = SUBDIVISION_MS[self.note_subdivision] / bpm
         self.device = sayodevice.SayoDevice.open()
@@ -846,20 +1070,30 @@ class SequenceGate:
         # Dirty-tracking for screen elements
         self.element_states: dict[int, dict] = {}
 
-        # Input
+        # Input (device lock serializes HID access between poller thread + main thread)
+        self._dev_lock = threading.Lock()
         if use_debug_input:
             self.input: InputHandler = DebugKeyboardInput()
         else:
-            self.input = DeviceInput(self.device)
+            self.input = DeviceInput(self.device, self._dev_lock)
 
         # MIDI
         self.midi = SequencerMidi(output_port=midi_output, input_port=midi_input)
         self._midi_enabled = enable_midi
-        self.cc = CCOutput(channel=cc_channel)
+        self.cc = CCOutput(channel=cc_channel, verbose=verbose_cc)
+
+        # Screen cycling
+        self._screens = cfg.get('screens', ['sequencer', 'stemfx', 'adsr'])
+        # Ensure sequencer is always present
+        if 'sequencer' not in self._screens:
+            self._screens.insert(0, 'sequencer')
+        self._screen_idx = 0  # start on sequencer
+
+        # StemFX
+        self.stemfx = StemFXScreen(cfg, self.cc)
 
         # ADSR (always available)
         self.adsr_editor: ADSREditor | None = None
-        self._in_adsr_mode = False
         self._in_learn_mode = False
 
         # Envelope generators per grid position
@@ -867,6 +1101,10 @@ class SequenceGate:
 
         # Track which squares had notes triggered on them (for note_off on beat departure)
         self._beat_notes: set[tuple[int, int]] = set()
+
+    @property
+    def _current_screen(self) -> str:
+        return self._screens[self._screen_idx]
 
     def _init_adsr(self):
         """Initialize ADSR components."""
@@ -887,6 +1125,7 @@ class SequenceGate:
         self.element_states.clear()
         if self.adsr_editor:
             self.adsr_editor._element_states.clear()
+        self.stemfx._element_states.clear()
 
     def _set_element(self, dev, index: int, element_type: int,
                      x: int = 0, y: int = 0, width: int = 40, height: int = 40,
@@ -918,16 +1157,9 @@ class SequenceGate:
         return first if is_first else normal
 
     def _draw_grid_lines(self, dev):
-        """Draw grid lines (layers 12-15) with subdivision-aware quarter markers.
-
-        Quarter-note boundaries vary by subdivision:
-            QUARTER:      every column = 1 quarter → all 3 vertical lines
-            EIGHTH:       every 2 beats = quarter → x=76 vertical + y=36 horizontal
-            SIXTEENTH:    every 4 beats = quarter → y=36 horizontal only
-            THIRTY_SECOND: 8 beats = 1 quarter → no quarter boundaries visible
-        """
+        """Draw grid lines (layers 12-15) with subdivision-aware quarter markers."""
         sub = self.note_subdivision
-        q = Colors.BEAT_BY_SUBDIV[sub][0]  # quarter marker = subdivision beat color
+        q = Colors.BEAT_BY_SUBDIV[sub][0]
         g = Colors.GRID
 
         if sub == "QUARTER":
@@ -966,6 +1198,23 @@ class SequenceGate:
         print(f"[MIDI Learn] ({pos[0]},{pos[1]}) = {note_name(note)} "
               f"(was {note_name(old_note) if old_note else 'none'})")
 
+    def _next_screen(self, dev):
+        """Cycle to the next screen."""
+        self._clear_all_elements(dev)
+        self._screen_idx = (self._screen_idx + 1) % len(self._screens)
+        name = self._current_screen
+        print(f"[Screen] → {name}")
+
+        if name == 'sequencer':
+            self._redraw_sequencer(dev)
+        elif name == 'adsr':
+            if self.adsr_editor:
+                self.adsr_editor.enter()
+                print(f"  ADSR: {self.adsr_editor.current_stage} "
+                      f"[{self.adsr_editor.PROP_LABELS[self.adsr_editor.current_prop]}]")
+        elif name == 'stemfx':
+            self.stemfx.enter()
+
     def update_beat(self):
         elapsed_ms = (time() - self.beat_time) * 1000
         if elapsed_ms >= self.ms_between_beats:
@@ -991,27 +1240,22 @@ class SequenceGate:
                 self.midi.start_learn(self._midi_learn_note)
                 self._in_learn_mode = True
         elif cmd == 'toggle_adsr':
-            self._in_adsr_mode = True
-            self.adsr_editor.enter()
+            # Debug shortcut: jump to ADSR screen
             self._clear_all_elements(dev)
-            print("[ADSR] Entering editor — attack")
+            try:
+                self._screen_idx = self._screens.index('adsr')
+            except ValueError:
+                return True
+            if self.adsr_editor:
+                self.adsr_editor.enter()
+            print("[Screen] → adsr")
             return True
 
-        # Knob: subdivision control + mode switches (supports multi-step)
+        # Knob: subdivision control (supports multi-step)
         for _ in range(inp.get('knob_right_count', 0)):
             self._set_subdivision(1, dev)
         for _ in range(inp.get('knob_left_count', 0)):
             self._set_subdivision(-1, dev)
-        if inp.get('knob_click'):
-            if self._in_learn_mode:
-                self.midi.stop_learn()
-                self._in_learn_mode = False
-            else:
-                self._in_adsr_mode = True
-                self.adsr_editor.enter()
-                self._clear_all_elements(dev)
-                print("[ADSR] Entering editor — attack")
-                return True
 
         now = time()
         b1 = inp.get('button1', False)
@@ -1088,28 +1332,51 @@ class SequenceGate:
         self.prev_button2 = b2
         return True
 
-    def render_beat_change(self, dev, prev_beat: int):
-        """Update display and trigger MIDI when beat advances."""
+    def _beat_midi(self, prev_beat: int):
+        """Handle MIDI note off/on when beat advances (runs regardless of screen)."""
         # Release notes from previous beat position
         px = prev_beat % Theme.GRID_COLS
         py = prev_beat // Theme.GRID_COLS
         prev_pos = (px, py)
-        prev_idx = py * Theme.GRID_COLS + px + 2
 
         if prev_pos in self._beat_notes:
             self.midi.note_off(prev_pos)
             self._beat_notes.discard(prev_pos)
-            # If we have envelope generators, trigger release
             gen = self._envelope_gens.get(prev_pos)
             if gen:
                 gen.gate_off()
+
+        # Send beat CC
+        if self._midi_enabled:
+            self.cc.send_beat(self.current_beat)
+
+        # Trigger notes for new beat position
+        bx = self.current_beat % Theme.GRID_COLS
+        by = self.current_beat // Theme.GRID_COLS
+        beat_pos = (bx, by)
+
+        if beat_pos in self.activated_squares and self._midi_enabled:
+            velocity = 127
+            gen = self._envelope_gens.get(beat_pos)
+            if gen and self.envelope:
+                gen.gate_on()
+                velocity = 127
+            self.midi.note_on(beat_pos, velocity=velocity)
+            self._beat_notes.add(beat_pos)
+
+    def render_beat_change(self, dev, prev_beat: int):
+        """Update sequencer display when beat advances (only when sequencer is visible)."""
+        px = prev_beat % Theme.GRID_COLS
+        py = prev_beat // Theme.GRID_COLS
+        prev_pos = (px, py)
+        prev_idx = py * Theme.GRID_COLS + px + 2
 
         if prev_pos in self.activated_squares:
             self._set_element(dev, prev_idx, 1, px*40, py*40, 40, 40, Colors.ACTIVATED)
         else:
             self._set_element(dev, prev_idx, 0, 0, 0, 40, 40, Colors.BG)
 
-        # Light up new beat square and trigger MIDI
+        # Light up new beat square
         bx = self.current_beat % Theme.GRID_COLS
         by = self.current_beat // Theme.GRID_COLS
         beat_pos = (bx, by)
@@ -1118,25 +1385,8 @@ class SequenceGate:
         color = self._beat_color(beat_pos in self.activated_squares, is_first)
         self._set_element(dev, curr_idx, 1, bx*40, by*40, 40, 40, color)
 
-        if self._midi_enabled:
-            self.cc.send_beat(self.current_beat)
-
-        # MIDI: trigger note if square is activated
-        if beat_pos in self.activated_squares and self._midi_enabled:
-            # Calculate velocity from ADSR envelope
-            velocity = 127
-            gen = self._envelope_gens.get(beat_pos)
-            if gen and self.envelope:
-                gen.gate_on()
-                velocity = max(1, int(gen.get_value() * 127))
-                # For the initial note_on, use full velocity since attack hasn't started yet
-                velocity = 127
-
-            self.midi.note_on(beat_pos, velocity=velocity)
-            self._beat_notes.add(beat_pos)
-
     def _redraw_sequencer(self, dev):
-        """Redraw the full sequencer screen after leaving editor mode."""
+        """Redraw the full sequencer screen after leaving another screen."""
         self._clear_all_elements(dev)
 
         # Background (layer 1)
@@ -1166,6 +1416,7 @@ class SequenceGate:
     def run(self):
         mode_str = "device" if not isinstance(self.input, DebugKeyboardInput) else "debug"
         print("Sequence Gate")
+        print(f"  Screens: {' → '.join(self._screens)}")
         print(f"  Mode: {self.note_subdivision} ({self.beats_per_bar} beats/bar)")
         print(f"  Input: {mode_str}")
 
@@ -1178,7 +1429,7 @@ class SequenceGate:
                 print("  MIDI disabled (failed to open)")
                 self._midi_enabled = False
 
-        # Initialize ADSR (always available via knob click)
+        # Initialize ADSR (always available via screen cycling)
         self._init_adsr()
         print(f"  ADSR: A={self.envelope.attack_ms}ms D={self.envelope.decay_ms}ms "
               f"S={self.envelope.sustain:.2f} R={self.envelope.release_ms}ms")
@@ -1187,18 +1438,21 @@ class SequenceGate:
         if self._midi_enabled:
             self.cc.dump_all(self.current_beat, self.bpm, self.note_subdivision,
                              self.activated_squares, self.envelope)
+            self.stemfx.send_initial_state()
             print(f"  CC output: channel {self.cc.channel}, CC 102-119")
 
         if isinstance(self.input, DebugKeyboardInput):
             print("  Keys: 1/2/3 buttons, k1/k2/k3 knob, +/- BPM, m learn, e ADSR, q quit")
         else:
-            print("  Device: btn1=left, btn2=toggle, btn3=right, knob=subdiv, click=ADSR")
+            print("  Device: btn1/2/3 = context, knob = adjust, click = next screen")
 
-        with self.device as dev:
+        with self.device as raw_dev:
+            dev = _LockedDev(raw_dev, self._dev_lock)
+
             # Clear all 16 elements for clean state (no stale artifacts)
             self._clear_all_elements(dev)
 
-            # Initial screen setup
+            # Initial screen setup (sequencer)
             dev.set_screen_element(
                 x=0, y=0, width=Theme.SCREEN_WIDTH, height=Theme.SCREEN_HEIGHT,
                 color=Colors.BG, element_type=1, element_index=1,
@@ -1218,32 +1472,53 @@ class SequenceGate:
             while True:
                 inp = self.input.poll()
 
-                if self._in_adsr_mode and self.adsr_editor:
-                    # ADSR editor mode
+                # Beat tracking always runs (keeps sequencer in sync across all screens)
+                self.update_beat()
+
+                # Handle knob click: screen cycling (consumed before dispatch)
+                if inp.get('knob_click'):
+                    screen = self._current_screen
+                    if screen == 'sequencer' and self._in_learn_mode:
+                        # In learn mode, knob click exits learn mode instead
+                        self.midi.stop_learn()
+                        self._in_learn_mode = False
+                    else:
+                        self._next_screen(dev)
+                        # Force beat sync after screen switch
+                        prev_beat = self.current_beat
+                    inp = dict(inp, knob_click=False)
+
+                # Dispatch to active screen
+                screen = self._current_screen
+
+                if screen == 'sequencer':
+                    if not self.process_input(inp, dev):
+                        break
+                    if self.current_beat != prev_beat:
+                        self._beat_midi(prev_beat)
+                        self.render_beat_change(dev, prev_beat)
+                        prev_beat = self.current_beat
+
+                elif screen == 'adsr' and self.adsr_editor:
                     result = self.adsr_editor.process_input(inp)
                     if result == 'quit':
                         break
-                    elif result == 'exit':
-                        self._in_adsr_mode = False
-                        print(f"[ADSR] A={self.envelope.attack_ms}ms D={self.envelope.decay_ms}ms "
-                              f"S={self.envelope.sustain:.2f} R={self.envelope.release_ms}ms")
-                        if self._midi_enabled:
-                            self.cc.send_adsr(self.envelope)
-                        # Redraw sequencer
-                        self._redraw_sequencer(dev)
-                    else:
-                        if self._midi_enabled:
-                            self.cc.send_adsr(self.envelope)
-                        self.adsr_editor.render(dev)
-                else:
-                    # Normal sequencer mode
-                    self.update_beat()
-
-                    if not self.process_input(inp, dev):
-                        break
-
+                    if self._midi_enabled:
+                        self.cc.send_adsr(self.envelope)
+                    self.adsr_editor.render(dev)
+                    # Background beat MIDI (no display update)
                     if self.current_beat != prev_beat:
-                        self.render_beat_change(dev, prev_beat)
+                        self._beat_midi(prev_beat)
+                        prev_beat = self.current_beat
+
+                elif screen == 'stemfx':
+                    result = self.stemfx.process_input(inp)
+                    if result == 'quit':
+                        break
+                    self.stemfx.render(dev)
+                    # Background beat MIDI (no display update)
+                    if self.current_beat != prev_beat:
+                        self._beat_midi(prev_beat)
                         prev_beat = self.current_beat
 
                 sleep(0.002)
@@ -1253,7 +1528,196 @@ class SequenceGate:
             self.midi.close()
 
 
+# ============================================================
+# Interactive Setup Menu
+# ============================================================
+
+def _list_midi_ports(direction: str) -> list[str]:
+    """List available MIDI ports. Returns empty list if mido not available."""
+    try:
+        import mido
+        if direction == 'output':
+            return list(mido.get_output_names())
+        else:
+            return list(mido.get_input_names())
+    except ImportError:
+        return []
+
+
+def _setup_midi_port(cfg: dict, key: str, direction: str) -> None:
+    """Interactive MIDI port selection."""
+    ports = _list_midi_ports(direction)
+    current = cfg.get(key, '')
+
+    print(f"\n  Available {direction} ports:")
+    if ports:
+        for i, p in enumerate(ports):
+            marker = " ←" if p == current else ""
+            print(f"    {i + 1}. {p}{marker}")
+    else:
+        print("    (none found — is mido installed?)")
+    print(f"    0. Auto (first available)")
+    print(f"    c. Clear (empty)")
+
+    choice = input("  Select: ").strip()
+    if choice == '0':
+        cfg[key] = ""
+    elif choice.lower() == 'c':
+        cfg[key] = ""
+    elif choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(ports):
+            cfg[key] = ports[idx]
+            print(f"  → {ports[idx]}")
+    else:
+        # Treat as literal port name
+        if choice:
+            cfg[key] = choice
+
+
+def _setup_screens(cfg: dict) -> None:
+    """Configure which screens are active and their order."""
+    available = ['sequencer', 'stemfx', 'adsr']
+    current = cfg.get('screens', DEFAULT_CONFIG['screens'])
+    print(f"\n  Current order: {' → '.join(current)}")
+    print(f"  Available: {', '.join(available)}")
+    print(f"  (sequencer is always included)")
+    screens_str = input("  Enter screens (comma-separated): ").strip()
+    if screens_str:
+        parts = [s.strip().lower() for s in screens_str.split(',')]
+        valid = [s for s in parts if s in available]
+        if 'sequencer' not in valid:
+            valid.insert(0, 'sequencer')
+        if valid:
+            cfg['screens'] = valid
+            print(f"  → {' → '.join(valid)}")
+
+
+def _setup_stemfx(cfg: dict) -> None:
+    """Configure StemFX stems."""
+    stemfx = cfg.get('stemfx', dict(DEFAULT_CONFIG['stemfx']))
+    stems = stemfx.get('stems', DEFAULT_CONFIG['stemfx']['stems'])
+
+    print(f"\n  StemFX Channel: {stemfx.get('channel', 15)}")
+    for i, s in enumerate(stems):
+        print(f"    {i + 1}. {s['name']}: CC {s['cc']}, color {s['color']}, dim {s['dim']}")
+
+    ch = input(f"  New channel (0-15) [{stemfx.get('channel', 15)}]: ").strip()
+    if ch and ch.isdigit():
+        stemfx['channel'] = max(0, min(15, int(ch)))
+
+    for i, s in enumerate(stems):
+        cc_str = input(f"  {s['name']} CC [{s['cc']}]: ").strip()
+        if cc_str and cc_str.isdigit():
+            s['cc'] = int(cc_str)
+        color_str = input(f"  {s['name']} color [{s['color']}]: ").strip()
+        if color_str.startswith('#') and len(color_str) in (7, 9):
+            s['color'] = color_str
+        dim_str = input(f"  {s['name']} dim color [{s['dim']}]: ").strip()
+        if dim_str.startswith('#') and len(dim_str) in (7, 9):
+            s['dim'] = dim_str
+
+    stemfx['stems'] = stems
+    cfg['stemfx'] = stemfx
+
+
+def _setup_sequencer(cfg: dict) -> None:
+    """Configure sequencer defaults."""
+    seq = cfg.get('sequencer', dict(DEFAULT_CONFIG['sequencer']))
+
+    bpm_str = input(f"  BPM (30-300) [{seq.get('bpm', 120)}]: ").strip()
+    if bpm_str and bpm_str.isdigit():
+        seq['bpm'] = max(30, min(300, int(bpm_str)))
+
+    print(f"  Subdivisions: {', '.join(SUBDIVISIONS)}")
+    sub = input(f"  Subdivision [{seq.get('subdivision', 'SIXTEENTH')}]: ").strip().upper()
+    if sub in SUBDIVISIONS:
+        seq['subdivision'] = sub
+
+    cfg['sequencer'] = seq
+
+
+def run_setup() -> dict | None:
+    """Interactive terminal setup. Returns config dict to run, or None to quit."""
+    cfg = load_config()
+
+    while True:
+        print("\n" + "=" * 40)
+        print("  Sequence Gate Setup")
+        print("=" * 40)
+        print(f"  Config: {CONFIG_FILE}\n")
+
+        print(f"  1. MIDI Output Port:  {cfg.get('midi_output') or '(auto)'}")
+        print(f"  2. MIDI Input Port:   {cfg.get('midi_input') or '(auto)'}")
+        print(f"  3. CC Channel:        {cfg.get('cc_channel', 15)}")
+        print(f"  4. Verbose CC:        {'yes' if cfg.get('verbose_cc') else 'no'}")
+        print(f"  5. Screens:           {' → '.join(cfg.get('screens', []))}")
+        print(f"  6. StemFX config")
+        print(f"  7. Sequencer defaults")
+        print()
+        print("  s. Save config")
+        print("  r. Save & Run")
+        print("  q. Quit")
+
+        choice = input("\nChoice: ").strip().lower()
+
+        if choice == '1':
+            _setup_midi_port(cfg, 'midi_output', 'output')
+        elif choice == '2':
+            _setup_midi_port(cfg, 'midi_input', 'input')
+        elif choice == '3':
+            ch = input(f"  CC Channel (0-15) [{cfg.get('cc_channel', 15)}]: ").strip()
+            if ch and ch.isdigit():
+                cfg['cc_channel'] = max(0, min(15, int(ch)))
+        elif choice == '4':
+            cfg['verbose_cc'] = not cfg.get('verbose_cc', False)
+            print(f"  → {'yes' if cfg['verbose_cc'] else 'no'}")
+        elif choice == '5':
+            _setup_screens(cfg)
+        elif choice == '6':
+            _setup_stemfx(cfg)
+        elif choice == '7':
+            _setup_sequencer(cfg)
+        elif choice == 's':
+            save_config(cfg)
+        elif choice == 'r':
+            save_config(cfg)
+            return cfg
+        elif choice == 'q':
+            return None
+
+    return None
+
+
+# ============================================================
+# Entry point
+# ============================================================
+
 if __name__ == "__main__":
+    # --setup: interactive config menu
+    if "--setup" in sys.argv:
+        result = run_setup()
+        if result is None:
+            sys.exit(0)
+        # Run with config from setup
+        use_midi = "--midi" in sys.argv or True  # setup implies MIDI
+        gate = SequenceGate(
+            config=result,
+            use_debug_input="--debug" in sys.argv,
+            enable_midi=use_midi,
+        )
+        try:
+            gate.run()
+        except KeyboardInterrupt:
+            print("\nShutting down...")
+        finally:
+            if hasattr(gate.input, 'stop'):
+                gate.input.stop()
+            if gate._midi_enabled:
+                gate.midi.close()
+        sys.exit(0)
+
+    # Normal CLI mode
     use_debug = "--debug" in sys.argv
     use_midi = "--midi" in sys.argv
 
@@ -1278,21 +1742,24 @@ if __name__ == "__main__":
         if idx + 1 < len(sys.argv):
             cc_channel = int(sys.argv[idx + 1])
 
+    verbose_cc = "--verbose-cc" in sys.argv
+
     print("\n" + "=" * 50)
     flags = []
     if use_debug: flags.append("debug")
     if use_midi: flags.append("MIDI")
+    if verbose_cc: flags.append("verbose-cc")
     mode = f" ({', '.join(flags)})" if flags else " (device mode)"
     print(f"Sequence Gate{mode}")
     print("=" * 50 + "\n")
 
     gate = SequenceGate(
-        bpm=Theme.DEFAULT_BPM,
         use_debug_input=use_debug,
         midi_output=midi_output,
         midi_input=midi_input,
         enable_midi=use_midi,
         cc_channel=cc_channel,
+        verbose_cc=verbose_cc,
     )
     try:
         gate.run()
