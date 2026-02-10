@@ -56,7 +56,7 @@ TUI::
     # Classic CLI: sayodevice --classic
 """
 
-__version__ = "1.3.5"
+__version__ = "1.4.0"
 
 # --- Protocol layer ---
 from .protocol import (
