@@ -26,7 +26,7 @@ class CaptureScreen(Screen):
     """Live capture & diff mode — baseline, snapshot, compare, label, save."""
 
     BINDINGS = [
-        Binding("escape", "app.pop_screen", "Back", show=True),
+        Binding("escape", "app.switch_screen('dashboard')", "Back", show=True),
         Binding("b", "take_baseline", "Baseline", show=True),
         Binding("n", "take_snapshot", "Snapshot", show=True),
         Binding("s", "toggle_sniff", "Sniff", show=True),

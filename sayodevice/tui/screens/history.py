@@ -20,7 +20,7 @@ class HistoryScreen(Screen):
     """Browse saved discoveries and re-view diffs."""
 
     BINDINGS = [
-        Binding("escape", "app.pop_screen", "Back", show=True),
+        Binding("escape", "app.switch_screen('dashboard')", "Back", show=True),
         Binding("r", "reload", "Reload", show=True),
         Binding("d", "delete", "Delete", show=True),
         Binding("enter", "view_detail", "View", show=True),
