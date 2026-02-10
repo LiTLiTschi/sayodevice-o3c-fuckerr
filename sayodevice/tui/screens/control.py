@@ -14,7 +14,7 @@ class ControlScreen(Screen):
     """Device control panel for setting position, color, arg0."""
 
     BINDINGS = [
-        Binding("escape", "app.pop_screen", "Back", show=True),
+        Binding("escape", "app.switch_screen('dashboard')", "Back", show=True),
     ]
 
     DEFAULT_CSS = """
