@@ -76,6 +76,8 @@ Config:
     Use --setup to edit interactively.
 """
 
+from __future__ import annotations
+
 import json
 import sys
 import threading
