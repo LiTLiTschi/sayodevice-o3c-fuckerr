@@ -353,3 +353,73 @@ def build_key_config(
     data[ARG0_OFFSET] = arg0 & 0xFF
     # TODO: set arg1/2/3 once offsets are confirmed
     return bytes(data)
+
+
+# ============================================================
+# Light configuration template
+# ============================================================
+
+# Captured from USB snapshot when setting button LED to #010000, static mode.
+# This is the 56-byte cmd_data portion of the Light (0x11) command.
+LIGHT_CONFIG_TEMPLATE = bytearray([
+    0x01, 0x00, 0x00, 0x00, 0xB8, 0x0B, 0xB8, 0x0B,  # [0x00] R,G,B,_,fade_in(u16),fade_out(u16)
+    0x08, 0x07, 0x08, 0x07, 0x64, 0x00, 0x00, 0x00,  # [0x08] ?,?,?,?,brightness,_,_,_
+    0x00, 0x00, 0x64, 0x64, 0x01, 0x00, 0x00, 0x00,  # [0x10] _,_,speed1,speed2,mode(u32)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  # [0x18]
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  # [0x20]
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  # [0x28]
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  # [0x30]
+])
+
+# Offsets within light config data
+LIGHT_R_OFFSET = 0x00
+LIGHT_G_OFFSET = 0x01
+LIGHT_B_OFFSET = 0x02
+LIGHT_BRIGHTNESS_OFFSET = 0x0C
+LIGHT_SPEED1_OFFSET = 0x12
+LIGHT_SPEED2_OFFSET = 0x13
+LIGHT_MODE_OFFSET = 0x14
+
+
+class LightMode:
+    """Known light mode values (uint32 at offset 0x14)."""
+    STATIC = 1
+
+
+def build_light_config(
+    r: int = 255,
+    g: int = 255,
+    b: int = 255,
+    brightness: int = 100,
+    mode: int = LightMode.STATIC,
+    speed1: int = 100,
+    speed2: int = 100,
+    template: bytearray | None = None,
+) -> bytes:
+    """
+    Build Light command data (56 bytes) for CmdId.LIGHT (0x11).
+
+    Reverse-engineered from USB capture snapshots.
+
+    Args:
+        r: Red component (0-255).
+        g: Green component (0-255).
+        b: Blue component (0-255).
+        brightness: Brightness percentage (0-100).
+        mode: Light mode (1 = static, others TBD).
+        speed1: Speed parameter 1 (0-255, default 100).
+        speed2: Speed parameter 2 (0-255, default 100).
+        template: Custom template bytes (default: captured template).
+
+    Returns:
+        56-byte light config data ready for ``send_single(CmdId.LIGHT, ...)``.
+    """
+    data = bytearray(template or LIGHT_CONFIG_TEMPLATE)
+    data[LIGHT_R_OFFSET] = r & 0xFF
+    data[LIGHT_G_OFFSET] = g & 0xFF
+    data[LIGHT_B_OFFSET] = b & 0xFF
+    data[LIGHT_BRIGHTNESS_OFFSET] = max(0, min(100, brightness))
+    data[LIGHT_SPEED1_OFFSET] = speed1 & 0xFF
+    data[LIGHT_SPEED2_OFFSET] = speed2 & 0xFF
+    struct.pack_into("<I", data, LIGHT_MODE_OFFSET, mode)
+    return bytes(data)

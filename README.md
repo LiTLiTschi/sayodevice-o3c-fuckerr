@@ -101,6 +101,24 @@ with SayoDevice.open() as dev:
     dev.refresh_display()
 ```
 
+## Button LEDs
+
+Control the RGB LED color of each physical button (reverse-engineered LIGHT command):
+
+```python
+with SayoDevice.open() as dev:
+    # Set button 1 to red
+    dev.set_key_light('#FF0000', key_index=0)
+
+    # Set button 2 to green with 50% brightness
+    dev.set_key_light((0, 255, 0), brightness=50, key_index=1)
+
+    # Set button 3 to blue and save to flash
+    dev.set_key_light('#0000FF', key_index=2, save=True)
+```
+
+Colors use RGB888 (not RGB565 like screen commands). Brightness is 0-100.
+
 ## ADSR Envelopes
 
 Configurable Attack-Decay-Sustain-Release envelopes with linear, exponential, and logarithmic curves:

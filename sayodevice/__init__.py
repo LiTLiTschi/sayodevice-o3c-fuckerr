@@ -67,6 +67,7 @@ from .protocol import (
     HidCommand,
     build_packet,
     build_key_config,
+    build_light_config,
     build_screen_element,
     calc_checksum,
     SysInfo,
@@ -76,6 +77,7 @@ from .protocol import (
     rgb_to_565,
     rgb565_to_rgb,
     hex_color_to_565,
+    LightMode,
 )
 
 # --- Device layer ---
@@ -172,7 +174,9 @@ __all__ = [
     "HidCommand",
     "build_packet",
     "build_key_config",
+    "build_light_config",
     "build_screen_element",
+    "LightMode",
     "calc_checksum",
     "SysInfo",
     "DeviceSetting",

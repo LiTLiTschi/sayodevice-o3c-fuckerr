@@ -36,6 +36,7 @@ from .protocol import (
     HidCommand,
     build_packet,
     build_key_config,
+    build_light_config,
     build_screen_element,
     calc_checksum,
     SysInfo,
@@ -358,6 +359,57 @@ class SayoDevice:
             dev.set_key_arg0(42, save=True)
         """
         return self.set_key_config(arg0=value, key_index=key_index, save=save)
+
+    # ---- Light (LED) configuration ----
+
+    def set_key_light(
+        self,
+        color: str | tuple[int, int, int] = (255, 255, 255),
+        brightness: int = 100,
+        key_index: int = 0,
+        mode: int = 1,
+        save: bool = False,
+    ) -> bytes | None:
+        """
+        Set the LED color for a physical button via LIGHT (CMD 0x11).
+
+        Reverse-engineered from USB capture snapshots. Uses RGB888 color
+        (not RGB565 like the screen commands).
+
+        Args:
+            color: Button LED color as ``'#RRGGBB'`` string or ``(R, G, B)`` tuple.
+            brightness: Brightness percentage (0-100).
+            key_index: Which key to configure (0-based).
+            mode: Light mode (1 = static, others TBD).
+            save: Also send Save command after.
+
+        Returns:
+            Response bytes or None.
+
+        Example::
+
+            dev.set_key_light('#FF0000', key_index=0)          # Button 1 red
+            dev.set_key_light((0, 255, 0), key_index=1)        # Button 2 green
+            dev.set_key_light('#0000FF', brightness=50, save=True)
+        """
+        if isinstance(color, str):
+            # Parse '#RRGGBB' to (R, G, B) — NOT RGB565
+            c = color.lstrip("#")
+            r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+        else:
+            r, g, b = color
+
+        data = build_light_config(
+            r=r, g=g, b=b,
+            brightness=brightness,
+            mode=mode,
+        )
+        resp = self.send_single(CmdId.LIGHT, data, index=key_index)
+
+        if save:
+            self.save()
+
+        return resp
 
     def save(self) -> bytes | None:
         """
