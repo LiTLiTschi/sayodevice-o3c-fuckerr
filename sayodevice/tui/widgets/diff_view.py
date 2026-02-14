@@ -28,11 +28,11 @@ class DiffView(Widget):
         """Update with a list of FieldChange objects."""
         self._changes = changes
         try:
-            self.query_one("#diff-content", Static).update(self._render())
+            self.query_one("#diff-content", Static).update(self._format_changes())
         except Exception:
             pass
 
-    def _render(self) -> str:
+    def _format_changes(self) -> str:
         if not self._changes:
             return "[dim]No changes detected[/dim]"
 

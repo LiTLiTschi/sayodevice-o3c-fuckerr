@@ -30,7 +30,7 @@ class HexView(Widget):
         self._title = title
 
     def compose(self) -> ComposeResult:
-        yield Static(self._render(), id="hex-content")
+        yield Static(self._format_hex(), id="hex-content")
 
     def update_data(
         self,
@@ -43,11 +43,11 @@ class HexView(Widget):
         if title:
             self._title = title
         try:
-            self.query_one("#hex-content", Static).update(self._render())
+            self.query_one("#hex-content", Static).update(self._format_hex())
         except Exception:
             pass
 
-    def _render(self) -> str:
+    def _format_hex(self) -> str:
         if not self._data:
             return "[dim]No data[/dim]"
 
